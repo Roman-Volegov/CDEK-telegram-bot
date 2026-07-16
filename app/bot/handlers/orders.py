@@ -15,6 +15,7 @@ from app.bot.keyboards.common import (
     confirm_address_kb,
     confirm_order_kb,
     main_menu,
+    pvz_kb,
     tariffs_kb,
 )
 from app.bot.states import OrderStates
@@ -63,12 +64,18 @@ async def order_address(
     wait = await message.answer("🔍 Распознаю адрес…")
     try:
         clean = await dadata.clean_address(raw)
+        lat = float(clean.geo_lat) if clean.geo_lat else None
+        lon = float(clean.geo_lon) if clean.geo_lon else None
         await state.update_data(
             raw_address=raw,
             clean_address=clean.display,
             city=clean.city_name,
             region=clean.region,
             postal_code=clean.postal_code,
+            street=clean.street,
+            house=clean.house,
+            geo_lat=lat,
+            geo_lon=lon,
         )
         await state.set_state(OrderStates.confirm_address)
         await wait.edit_text(
@@ -160,7 +167,11 @@ async def order_tariff_cancel(callback: CallbackQuery, state: FSMContext) -> Non
 
 
 @router.callback_query(OrderStates.choose_tariff, F.data.startswith("otariff:"))
-async def order_tariff_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+async def order_tariff_chosen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    cdek: CdekClient,
+) -> None:
     idx_raw = (callback.data or "").split(":")[-1]
     if not idx_raw.isdigit():
         await callback.answer()
@@ -176,11 +187,75 @@ async def order_tariff_chosen(callback: CallbackQuery, state: FSMContext) -> Non
     await state.update_data(chosen_tariff=chosen)
     tariff = TariffOption(**chosen)
     if tariff.to_pvz:
-        await state.set_state(OrderStates.waiting_pvz)
         await callback.message.edit_text(
-            f"Тариф: <b>{tariff.tariff_name}</b>\n"
-            "Нужен код ПВЗ СДЭК получателя (например <code>SPB1</code>).\n"
-            "Отправьте код ПВЗ:"
+            f"Тариф: <b>{tariff.tariff_name}</b>\n🔍 Ищу ПВЗ СДЭК по адресу…"
+        )
+        try:
+            points, kind = await cdek.find_pvz_for_address(
+                city_code=int(data["to_city_code"]),
+                address=data.get("clean_address") or "",
+                street=data.get("street"),
+                house=data.get("house"),
+                postal_code=data.get("postal_code"),
+                latitude=data.get("geo_lat"),
+                longitude=data.get("geo_lon"),
+                limit=8,
+            )
+        except Exception as exc:
+            logger.exception("pvz search failed")
+            await state.set_state(OrderStates.waiting_pvz)
+            await callback.message.edit_text(
+                f"Не удалось подобрать ПВЗ автоматически: {exc}\n"
+                "Введите код ПВЗ вручную (например <code>SPB17</code>):"
+            )
+            await callback.answer()
+            return
+
+        if not points:
+            await state.set_state(OrderStates.waiting_pvz)
+            await callback.message.edit_text(
+                "ПВЗ по этому адресу и рядом не найдены.\n"
+                "Введите код ПВЗ вручную (например <code>SPB17</code>):"
+            )
+            await callback.answer()
+            return
+
+        serialized = [
+            {
+                "code": p.code,
+                "name": p.name,
+                "address": p.address,
+                "address_full": p.address_full,
+                "distance_km": p.distance_km,
+                "work_time": p.work_time,
+                "match_kind": p.match_kind,
+            }
+            for p in points
+        ]
+        await state.update_data(pvz_options=serialized)
+        await state.set_state(OrderStates.choose_pvz)
+
+        if kind == "exact":
+            header = (
+                f"Тариф: <b>{tariff.tariff_name}</b>\n"
+                f"📍 Нашёл ПВЗ по адресу:\n<code>{data.get('clean_address')}</code>\n"
+                "Выберите пункт:"
+            )
+        else:
+            header = (
+                f"Тариф: <b>{tariff.tariff_name}</b>\n"
+                f"📍 Точного ПВЗ по адресу нет.\n"
+                f"Ближайшие к <code>{data.get('clean_address')}</code>:"
+            )
+        lines = [header, ""]
+        for p in points:
+            dist = f" (~{p.distance_km:.1f} км)" if p.distance_km is not None else ""
+            work = f"\n  🕒 {p.work_time}" if p.work_time else ""
+            lines.append(f"• <b>{p.code}</b> — {p.address}{dist}{work}")
+
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=pvz_kb(points, prefix="pvz"),
         )
     else:
         await state.set_state(OrderStates.waiting_name)
@@ -190,13 +265,55 @@ async def order_tariff_chosen(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+@router.callback_query(OrderStates.choose_pvz, F.data == "pvz:cancel")
+async def order_pvz_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.edit_text("Создание заказа отменено.")
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.choose_pvz, F.data == "pvz:manual")
+async def order_pvz_manual(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(OrderStates.waiting_pvz)
+    await callback.message.edit_text(
+        "Введите код ПВЗ вручную (например <code>SPB17</code>):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.choose_pvz, F.data.startswith("pvz:"))
+async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    idx_raw = (callback.data or "").split(":")[-1]
+    if not idx_raw.isdigit():
+        await callback.answer()
+        return
+    idx = int(idx_raw)
+    data = await state.get_data()
+    options = data.get("pvz_options") or []
+    if idx < 0 or idx >= len(options):
+        await callback.answer("ПВЗ недоступен", show_alert=True)
+        return
+    point = options[idx]
+    await state.update_data(
+        delivery_point=point["code"],
+        delivery_point_address=point.get("address") or point.get("address_full"),
+    )
+    await state.set_state(OrderStates.waiting_name)
+    await callback.message.edit_text(
+        f"ПВЗ: <b>{point['code']}</b>\n"
+        f"{point.get('address') or ''}\n\n"
+        "Введите ФИО получателя:"
+    )
+    await callback.answer()
+
+
 @router.message(OrderStates.waiting_pvz, F.text)
 async def order_pvz(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip().upper()
     if len(code) < 3:
-        await message.answer("Код ПВЗ слишком короткий. Пример: SPB1")
+        await message.answer("Код ПВЗ слишком короткий. Пример: SPB17")
         return
-    await state.update_data(delivery_point=code)
+    await state.update_data(delivery_point=code, delivery_point_address=None)
     await state.set_state(OrderStates.waiting_name)
     await message.answer("Введите ФИО получателя:")
 
@@ -241,7 +358,11 @@ async def order_item_cost(message: Message, state: FSMContext, settings: Setting
     data = await state.get_data()
     tariff = data["chosen_tariff"]
     pvz = data.get("delivery_point")
-    dest = f"ПВЗ {pvz}" if pvz else data.get("clean_address")
+    pvz_addr = data.get("delivery_point_address")
+    if pvz:
+        dest = f"ПВЗ {pvz}" + (f" — {pvz_addr}" if pvz_addr else "")
+    else:
+        dest = data.get("clean_address")
 
     text = (
         "<b>Проверьте заказ</b>\n\n"

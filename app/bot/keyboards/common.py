@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.services.cdek import TariffOption
+from app.services.cdek import PickupPoint, TariffOption
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -42,4 +42,20 @@ def confirm_order_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Создать заказ", callback_data="order:create"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel"),
     )
+    return builder.as_markup()
+
+
+def pvz_kb(points: list[PickupPoint], prefix: str = "pvz") -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for idx, point in enumerate(points[:8]):
+        builder.row(
+            InlineKeyboardButton(
+                text=point.button_label(),
+                callback_data=f"{prefix}:{idx}",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="⌨️ Ввести код вручную", callback_data=f"{prefix}:manual")
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}:cancel"))
     return builder.as_markup()

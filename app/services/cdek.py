@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,13 @@ import httpx
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
+
+_STREET_NOISE_RE = re.compile(
+    r"\b(ул\.?|улица|пр-кт|проспект|пер\.?|переулок|б-р|бульвар|ш\.?|шоссе|"
+    r"наб\.?|набережная|пл\.?|площадь|ал\.?|аллея|проезд|туп\.?|тупик)\b",
+    re.IGNORECASE,
+)
+_HOUSE_RE = re.compile(r"(\d+[a-zа-я]?)", re.IGNORECASE)
 
 
 @dataclass
@@ -59,6 +68,58 @@ class CreatedOrder:
     our_number: str
     cdek_number: str | None
     status: str
+
+
+@dataclass
+class PickupPoint:
+    code: str
+    name: str
+    address: str
+    address_full: str
+    city_code: int | None
+    latitude: float | None
+    longitude: float | None
+    work_time: str | None
+    point_type: str
+    distance_km: float | None = None
+    match_kind: str = "nearest"  # exact | nearest
+
+    def button_label(self, max_len: int = 56) -> str:
+        dist = f" · {self.distance_km:.1f} км" if self.distance_km is not None else ""
+        text = f"{self.code}: {self.address}{dist}"
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 1] + "…"
+
+    def description(self) -> str:
+        dist = f" (~{self.distance_km:.1f} км)" if self.distance_km is not None else ""
+        work = f"\n🕒 {self.work_time}" if self.work_time else ""
+        return f"<b>{self.code}</b> — {self.address}{dist}{work}"
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _normalize_street(value: str | None) -> str:
+    if not value:
+        return ""
+    text = value.lower().replace("ё", "е")
+    text = _STREET_NOISE_RE.sub(" ", text)
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_house(value: str | None) -> str:
+    if not value:
+        return ""
+    match = _HOUSE_RE.search(value.replace(" ", ""))
+    return (match.group(1) if match else value).lower()
 
 
 class CdekClient:
@@ -141,6 +202,114 @@ class CdekClient:
                 )
             )
         return matches
+
+    async def get_delivery_points(
+        self,
+        *,
+        city_code: int,
+        point_type: str = "PVZ",
+        postal_code: str | None = None,
+    ) -> list[PickupPoint]:
+        params: dict[str, Any] = {
+            "city_code": city_code,
+            "type": point_type,
+            "is_handout": True,
+        }
+        if postal_code and postal_code.isdigit():
+            params["postal_code"] = int(postal_code)
+
+        data = await self._request("GET", "/deliverypoints", params=params)
+        # API может вернуть список или обёртку
+        items = data if isinstance(data, list) else (data.get("deliverypoints") or data.get("items") or [])
+        points: list[PickupPoint] = []
+        for item in items or []:
+            location = item.get("location") or {}
+            lat = location.get("latitude")
+            lon = location.get("longitude")
+            if lat is None and isinstance(location.get("coordinates"), dict):
+                lat = location["coordinates"].get("latitude")
+                lon = location["coordinates"].get("longitude")
+            address = location.get("address") or item.get("address") or ""
+            address_full = location.get("address_full") or address
+            points.append(
+                PickupPoint(
+                    code=str(item.get("code") or ""),
+                    name=str(item.get("name") or item.get("code") or ""),
+                    address=address,
+                    address_full=address_full,
+                    city_code=location.get("city_code") or city_code,
+                    latitude=float(lat) if lat is not None else None,
+                    longitude=float(lon) if lon is not None else None,
+                    work_time=item.get("work_time"),
+                    point_type=str(item.get("type") or point_type),
+                )
+            )
+        return [p for p in points if p.code]
+
+    async def find_pvz_for_address(
+        self,
+        *,
+        city_code: int,
+        address: str,
+        street: str | None = None,
+        house: str | None = None,
+        postal_code: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        limit: int = 8,
+    ) -> tuple[list[PickupPoint], str]:
+        """
+        Ищет ПВЗ по адресу. Сначала совпадения по улице/дому,
+        если нет — ближайшие по координатам.
+        Возвращает (список, режим: exact|nearest|none).
+        """
+        points = await self.get_delivery_points(city_code=city_code, point_type="PVZ")
+        if not points and postal_code:
+            points = await self.get_delivery_points(
+                city_code=city_code, point_type="PVZ", postal_code=postal_code
+            )
+        if not points:
+            # постаматы как запасной вариант
+            points = await self.get_delivery_points(city_code=city_code, point_type="ALL")
+
+        if latitude is not None and longitude is not None:
+            for p in points:
+                if p.latitude is not None and p.longitude is not None:
+                    p.distance_km = _haversine_km(latitude, longitude, p.latitude, p.longitude)
+
+        street_n = _normalize_street(street) or _normalize_street(address)
+        house_n = _extract_house(house)
+
+        exact: list[PickupPoint] = []
+        if street_n:
+            for p in points:
+                hay = _normalize_street(f"{p.address_full} {p.address} {p.name}")
+                if street_n and street_n in hay:
+                    if house_n:
+                        # дом есть в адресе ПВЗ или рядом (тот же дом/литера)
+                        if house_n in hay.replace(" ", ""):
+                            p.match_kind = "exact"
+                            exact.append(p)
+                    else:
+                        p.match_kind = "exact"
+                        exact.append(p)
+
+        if exact:
+            exact.sort(key=lambda p: (p.distance_km is None, p.distance_km or 0.0))
+            return exact[:limit], "exact"
+
+        if latitude is not None and longitude is not None:
+            with_coords = [p for p in points if p.distance_km is not None]
+            with_coords.sort(key=lambda p: p.distance_km or 0.0)
+            for p in with_coords:
+                p.match_kind = "nearest"
+            if with_coords:
+                return with_coords[:limit], "nearest"
+
+        # без координат — просто первые по городу
+        for p in points[:limit]:
+            p.match_kind = "nearest"
+        return points[:limit], ("nearest" if points else "none")
 
     async def calculate_tariffs(
         self,

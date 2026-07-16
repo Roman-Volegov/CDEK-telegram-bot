@@ -9,6 +9,7 @@ class OrderStates(StatesGroup):
     waiting_address = State()
     confirm_address = State()
     choose_tariff = State()
+    choose_pvz = State()
     waiting_pvz = State()
     waiting_name = State()
     waiting_phone = State()

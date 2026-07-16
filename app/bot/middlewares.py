@@ -3,17 +3,14 @@ from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.services.cdek import CdekClient
-from app.services.dadata import DaDataClient
+from app.services.crypto import SecretBox
+from app.services.profile import ProfileService
 
 
 class AccessControlMiddleware(BaseMiddleware):
-    """Пропускает только пользователей из ALLOWED_TELEGRAM_IDS (если список задан)."""
-
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
@@ -30,7 +27,6 @@ class AccessControlMiddleware(BaseMiddleware):
         if self.settings.is_user_allowed(user_id, username):
             return await handler(event, data)
 
-        # Сообщаем ID — чтобы его можно было добавить в whitelist
         uname = f"@{username}" if username else "—"
         text = (
             "⛔ Бот доступен только авторизованным пользователям.\n"
@@ -58,14 +54,12 @@ class ServicesMiddleware(BaseMiddleware):
     def __init__(
         self,
         settings: Settings,
-        cdek: CdekClient,
-        dadata: DaDataClient,
         session_factory: async_sessionmaker[AsyncSession],
+        profiles: ProfileService,
     ) -> None:
         self.settings = settings
-        self.cdek = cdek
-        self.dadata = dadata
         self.session_factory = session_factory
+        self.profiles = profiles
 
     async def __call__(
         self,
@@ -74,7 +68,6 @@ class ServicesMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         data["settings"] = self.settings
-        data["cdek"] = self.cdek
-        data["dadata"] = self.dadata
         data["session_factory"] = self.session_factory
+        data["profiles"] = self.profiles
         return await handler(event, data)

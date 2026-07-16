@@ -7,13 +7,20 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import FSInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.deps import (
+    build_order_summary,
+    effective_package,
+    ensure_runtime,
+    order_overrides_from_state,
+)
 from app.bot.keyboards.common import (
     confirm_address_kb,
     confirm_order_kb,
+    edit_order_kb,
     main_menu,
     pvz_kb,
     tariffs_kb,
@@ -23,8 +30,8 @@ from app.bot.states import OrderStates
 from app.config import Settings
 from app.db.models import Order
 from app.db.numerator import next_order_number
-from app.services.cdek import CdekClient, TariffOption
-from app.services.dadata import DaDataClient
+from app.services.cdek import TariffOption
+from app.services.profile import ProfileService
 
 logger = logging.getLogger(__name__)
 router = Router(name="order")
@@ -45,12 +52,21 @@ def _normalize_phone(raw: str) -> str:
 
 @router.message(Command("order"))
 @router.message(F.text == "🚚 Создать заказ")
-async def order_start(message: Message, state: FSMContext) -> None:
+async def order_start(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     await state.clear()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory
+    )
+    if ready is None:
+        return
     await state.set_state(OrderStates.waiting_address)
     await message.answer(
-        "Создание заказа СДЭК.\n"
-        "Отправьте адрес доставки в любом формате.",
+        "Создание заказа СДЭК.\nОтправьте адрес доставки в любом формате.",
         reply_markup=main_menu(),
     )
 
@@ -59,8 +75,15 @@ async def order_start(message: Message, state: FSMContext) -> None:
 async def order_address(
     message: Message,
     state: FSMContext,
-    dadata: DaDataClient,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory
+    )
+    if ready is None:
+        return
+    _, _, dadata = ready
     raw = (message.text or "").strip()
     wait = await message.answer("🔍 Распознаю адрес…")
     try:
@@ -99,17 +122,23 @@ async def order_address_retry(callback: CallbackQuery, state: FSMContext) -> Non
 async def order_address_ok(
     callback: CallbackQuery,
     state: FSMContext,
-    cdek: CdekClient,
-    settings: Settings,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     data = await state.get_data()
+    ready = await ensure_runtime(
+        callback, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    cfg, cdek, _ = ready
     city_name = data.get("city") or ""
     region = data.get("region")
     await callback.message.edit_text("Считаю тарифы…")
     try:
-        cities = await cdek.find_city(city_name, region)
-        if not cities:
-            cities = await cdek.find_city(city_name)
+        cities = await cdek.find_city(city_name, region) or await cdek.find_city(city_name)
         if not cities:
             await callback.message.edit_text(
                 f"Город «{city_name}» не найден в СДЭК. /order — начать заново."
@@ -119,12 +148,13 @@ async def order_address_ok(
             return
 
         city = cities[0]
+        weight, length, width, height = effective_package(cfg, data)
         tariffs = await cdek.calculate_tariffs(
             to_city_code=city.code,
-            weight=settings.default_weight_g,
-            length=settings.default_length_cm,
-            width=settings.default_width_cm,
-            height=settings.default_height_cm,
+            weight=weight,
+            length=length,
+            width=width,
+            height=height,
         )
         if not tariffs:
             await callback.message.edit_text("Тарифы не найдены.")
@@ -145,10 +175,7 @@ async def order_address_ok(
         ]
         await state.update_data(to_city_code=city.code, tariffs=serialized)
         await state.set_state(OrderStates.choose_tariff)
-
-        lines = ["Выберите тариф:"]
-        for t in tariffs[:10]:
-            lines.append(f"• {t.label()}")
+        lines = ["Выберите тариф:"] + [f"• {t.label()}" for t in tariffs[:10]]
         await callback.message.edit_text(
             "\n".join(lines),
             reply_markup=tariffs_kb(tariffs, prefix="otariff"),
@@ -171,7 +198,8 @@ async def order_tariff_cancel(callback: CallbackQuery, state: FSMContext) -> Non
 async def order_tariff_chosen(
     callback: CallbackQuery,
     state: FSMContext,
-    cdek: CdekClient,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     idx_raw = (callback.data or "").split(":")[-1]
     if not idx_raw.isdigit():
@@ -187,82 +215,78 @@ async def order_tariff_chosen(
     chosen = tariffs[idx]
     await state.update_data(chosen_tariff=chosen)
     tariff = TariffOption(**chosen)
-    if tariff.to_pvz:
-        await callback.message.edit_text(
-            f"Тариф: <b>{tariff.tariff_name}</b>\n🔍 Ищу ПВЗ СДЭК по адресу…"
-        )
-        try:
-            points, kind = await cdek.find_pvz_for_address(
-                city_code=int(data["to_city_code"]),
-                address=data.get("clean_address") or "",
-                street=data.get("street"),
-                house=data.get("house"),
-                postal_code=data.get("postal_code"),
-                latitude=data.get("geo_lat"),
-                longitude=data.get("geo_lon"),
-                limit=8,
-            )
-        except Exception as exc:
-            logger.exception("pvz search failed")
-            await state.set_state(OrderStates.waiting_pvz)
-            await callback.message.edit_text(
-                f"Не удалось подобрать ПВЗ автоматически: {exc}\n"
-                "Введите код ПВЗ вручную (например <code>SPB17</code>):"
-            )
-            await callback.answer()
-            return
-
-        if not points:
-            await state.set_state(OrderStates.waiting_pvz)
-            await callback.message.edit_text(
-                "ПВЗ по этому адресу и рядом не найдены.\n"
-                "Введите код ПВЗ вручную (например <code>SPB17</code>):"
-            )
-            await callback.answer()
-            return
-
-        serialized = [
-            {
-                "code": p.code,
-                "name": p.name,
-                "address": p.address,
-                "address_full": p.address_full,
-                "distance_km": p.distance_km,
-                "work_time": p.work_time,
-                "match_kind": p.match_kind,
-            }
-            for p in points
-        ]
-        await state.update_data(pvz_options=serialized)
-        await state.set_state(OrderStates.choose_pvz)
-
-        if kind == "exact":
-            header = (
-                f"Тариф: <b>{tariff.tariff_name}</b>\n"
-                f"📍 Нашёл ПВЗ по адресу:\n<code>{data.get('clean_address')}</code>\n"
-                "Выберите пункт:"
-            )
-        else:
-            header = (
-                f"Тариф: <b>{tariff.tariff_name}</b>\n"
-                f"📍 Точного ПВЗ по адресу нет.\n"
-                f"Ближайшие к <code>{data.get('clean_address')}</code>:"
-            )
-        lines = [header, ""]
-        for p in points:
-            dist = f" (~{p.distance_km:.1f} км)" if p.distance_km is not None else ""
-            work = f"\n  🕒 {p.work_time}" if p.work_time else ""
-            lines.append(f"• <b>{p.code}</b> — {p.address}{dist}{work}")
-
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=pvz_kb(points, prefix="pvz"),
-        )
-    else:
+    if not tariff.to_pvz:
         await state.set_state(OrderStates.waiting_name)
         await callback.message.edit_text(
             f"Тариф: <b>{tariff.tariff_name}</b>\nВведите ФИО получателя:"
         )
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        f"Тариф: <b>{tariff.tariff_name}</b>\n🔍 Ищу ПВЗ СДЭК по адресу…"
+    )
+    ready = await ensure_runtime(
+        callback, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    _, cdek, _ = ready
+    try:
+        points, kind = await cdek.find_pvz_for_address(
+            city_code=int(data["to_city_code"]),
+            address=data.get("clean_address") or "",
+            street=data.get("street"),
+            house=data.get("house"),
+            postal_code=data.get("postal_code"),
+            latitude=data.get("geo_lat"),
+            longitude=data.get("geo_lon"),
+            limit=8,
+        )
+    except Exception as exc:
+        logger.exception("pvz search failed")
+        await state.set_state(OrderStates.waiting_pvz)
+        await callback.message.edit_text(
+            f"Не удалось подобрать ПВЗ автоматически: {exc}\n"
+            "Введите код ПВЗ вручную:"
+        )
+        await callback.answer()
+        return
+
+    if not points:
+        await state.set_state(OrderStates.waiting_pvz)
+        await callback.message.edit_text(
+            "ПВЗ не найдены. Введите код ПВЗ вручную:"
+        )
+        await callback.answer()
+        return
+
+    serialized = [
+        {
+            "code": p.code,
+            "name": p.name,
+            "address": p.address,
+            "address_full": p.address_full,
+            "distance_km": p.distance_km,
+            "work_time": p.work_time,
+            "match_kind": p.match_kind,
+        }
+        for p in points
+    ]
+    await state.update_data(pvz_options=serialized)
+    await state.set_state(OrderStates.choose_pvz)
+    if kind == "exact":
+        header = f"📍 Нашёл ПВЗ по адресу:\n<code>{data.get('clean_address')}</code>"
+    else:
+        header = f"📍 Точного ПВЗ нет. Ближайшие к <code>{data.get('clean_address')}</code>:"
+    lines = [f"Тариф: <b>{tariff.tariff_name}</b>", header, ""]
+    for p in points:
+        dist = f" (~{p.distance_km:.1f} км)" if p.distance_km is not None else ""
+        work = f"\n  🕒 {p.work_time}" if p.work_time else ""
+        lines.append(f"• <b>{p.code}</b> — {p.address}{dist}{work}")
+    await callback.message.edit_text("\n".join(lines), reply_markup=pvz_kb(points, prefix="pvz"))
     await callback.answer()
 
 
@@ -276,9 +300,7 @@ async def order_pvz_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(OrderStates.choose_pvz, F.data == "pvz:manual")
 async def order_pvz_manual(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderStates.waiting_pvz)
-    await callback.message.edit_text(
-        "Введите код ПВЗ вручную (например <code>SPB17</code>):"
-    )
+    await callback.message.edit_text("Введите код ПВЗ вручную:")
     await callback.answer()
 
 
@@ -301,8 +323,7 @@ async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     )
     await state.set_state(OrderStates.waiting_name)
     await callback.message.edit_text(
-        f"ПВЗ: <b>{point['code']}</b>\n"
-        f"{point.get('address') or ''}\n\n"
+        f"ПВЗ: <b>{point['code']}</b>\n{point.get('address') or ''}\n\n"
         "Введите ФИО получателя:"
     )
     await callback.answer()
@@ -312,7 +333,7 @@ async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 async def order_pvz(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip().upper()
     if len(code) < 3:
-        await message.answer("Код ПВЗ слишком короткий. Пример: SPB17")
+        await message.answer("Код ПВЗ слишком короткий.")
         return
     await state.update_data(delivery_point=code, delivery_point_address=None)
     await state.set_state(OrderStates.waiting_name)
@@ -339,13 +360,17 @@ async def order_phone(message: Message, state: FSMContext) -> None:
     await state.update_data(recipient_phone=phone)
     await state.set_state(OrderStates.waiting_item_cost)
     await message.answer(
-        "Укажите стоимость товара для декларации (₽).\n"
-        "Наложенный платёж будет 0."
+        "Укажите стоимость товара для декларации (₽).\nНаложенный платёж будет 0."
     )
 
 
 @router.message(OrderStates.waiting_item_cost, F.text, ~F.text.in_(MENU_TEXTS))
-async def order_item_cost(message: Message, state: FSMContext, settings: Settings) -> None:
+async def order_item_cost(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     raw = (message.text or "").replace(",", ".").strip()
     try:
         cost = float(raw)
@@ -357,29 +382,25 @@ async def order_item_cost(message: Message, state: FSMContext, settings: Setting
 
     await state.update_data(item_cost=cost)
     data = await state.get_data()
-    tariff = data["chosen_tariff"]
-    pvz = data.get("delivery_point")
-    pvz_addr = data.get("delivery_point_address")
-    if pvz:
-        dest = f"ПВЗ {pvz}" + (f" — {pvz_addr}" if pvz_addr else "")
-    else:
-        dest = data.get("clean_address")
-
-    text = (
-        "<b>Проверьте заказ</b>\n\n"
-        f"Куда: {dest}\n"
-        f"Тариф: {tariff['tariff_name']} — {tariff['delivery_sum']:.0f} ₽\n"
-        f"Получатель: {data['recipient_name']}, {data['recipient_phone']}\n"
-        f"Товар: {settings.default_item_name}, cost={cost:.0f} ₽, НП=0\n"
-        f"Место: {settings.default_weight_g} г, "
-        f"{settings.default_length_cm}×{settings.default_width_cm}×{settings.default_height_cm}\n"
-        f"Отправитель / seller: {settings.cdek_sender_name}, {settings.cdek_sender_phone}\n"
-        f"Тип: интернет-магазин (type={settings.cdek_order_type})\n"
-        f"Отгрузка: ПВЗ {settings.cdek_shipment_point}\n"
-        f"Номер будет вида <code>2026-000001</code>"
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
     )
+    if ready is None:
+        return
+    cfg, _, _ = ready
     await state.set_state(OrderStates.confirm_order)
-    await message.answer(text, reply_markup=confirm_order_kb())
+    await message.answer(build_order_summary(cfg, data, cost), reply_markup=confirm_order_kb())
+
+
+async def _show_confirm(callback: CallbackQuery, state: FSMContext, cfg) -> None:
+    data = await state.get_data()
+    cost = float(data.get("item_cost") or 0)
+    await state.set_state(OrderStates.confirm_order)
+    await callback.message.edit_text(
+        build_order_summary(cfg, data, cost),
+        reply_markup=confirm_order_kb(),
+    )
 
 
 @router.callback_query(OrderStates.confirm_order, F.data == "order:cancel")
@@ -389,24 +410,193 @@ async def order_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(OrderStates.confirm_order, F.data == "order:edit")
+async def order_edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(OrderStates.edit_menu)
+    await callback.message.edit_text(
+        "Что изменить для <b>этого</b> заказа?",
+        reply_markup=edit_order_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:back")
+async def order_edit_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        callback, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    cfg, _, _ = ready
+    await _show_confirm(callback, state, cfg)
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:dims")
+async def order_edit_dims(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(OrderStates.edit_dimensions)
+    await callback.message.edit_text(
+        "Введите габариты: <b>вес_г длина ширина высота</b>\n"
+        "Пример: <code>100 10 10 5</code>"
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_dimensions, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_dims_value(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    parts = (message.text or "").replace("×", " ").replace("x", " ").replace("х", " ").split()
+    if len(parts) != 4:
+        await message.answer("Нужно 4 числа: вес длина ширина высота. Пример: 100 10 10 5")
+        return
+    try:
+        weight, length, width, height = (int(float(p)) for p in parts)
+        if min(weight, length, width, height) <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Некорректные значения.")
+        return
+    await state.update_data(
+        override_weight_g=weight,
+        override_length_cm=length,
+        override_width_cm=width,
+        override_height_cm=height,
+    )
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await state.set_state(OrderStates.confirm_order)
+    await message.answer(
+        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:sender")
+async def order_edit_sender(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(OrderStates.edit_sender_name)
+    await callback.message.edit_text("Введите ФИО отправителя для этого заказа:")
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_sender_name, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_sender_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if len(name) < 3:
+        await message.answer("Укажите полное ФИО.")
+        return
+    await state.update_data(override_sender_name=name)
+    await state.set_state(OrderStates.edit_sender_phone)
+    await message.answer("Телефон отправителя (+79001234567):")
+
+
+@router.message(OrderStates.edit_sender_phone, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_sender_phone(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = _normalize_phone(message.text or "")
+    if not PHONE_RE.match(phone):
+        await message.answer("Некорректный телефон.")
+        return
+    await state.update_data(override_sender_phone=phone)
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await state.set_state(OrderStates.confirm_order)
+    await message.answer(
+        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:shipment")
+async def order_edit_shipment(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(OrderStates.edit_shipment_point)
+    await callback.message.edit_text(
+        "Введите код ПВЗ <b>отправки</b> для этого заказа (например PRM17):"
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_shipment_point, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_shipment_value(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    code = (message.text or "").strip().upper()
+    if len(code) < 3:
+        await message.answer("Код ПВЗ слишком короткий.")
+        return
+    await state.update_data(override_shipment_point=code)
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await state.set_state(OrderStates.confirm_order)
+    await message.answer(
+        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
 @router.callback_query(OrderStates.confirm_order, F.data == "order:create")
 async def order_create(
     callback: CallbackQuery,
     state: FSMContext,
-    cdek: CdekClient,
-    settings: Settings,
+    profiles: ProfileService,
     session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
 ) -> None:
     data = await state.get_data()
+    ready = await ensure_runtime(
+        callback, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    cfg, cdek, _ = ready
+
     await callback.message.edit_text("⏳ Создаю заказ в СДЭК и готовлю PDF…")
     await callback.answer()
 
     tariff = data["chosen_tariff"]
     our_number: str | None = None
     created_uuid: str | None = None
+    weight, length, width, height = effective_package(cfg, data)
 
     try:
-        # 1) Сразу фиксируем номер в БД (не откатываем при ошибке СДЭК)
         async with session_factory() as session:
             our_number = await next_order_number(session)
             order = Order(
@@ -435,7 +625,12 @@ async def order_create(
             recipient_phone=data["recipient_phone"],
             item_cost=float(data["item_cost"]),
             delivery_point=data.get("delivery_point"),
+            weight=weight,
+            length=length,
+            width=width,
+            height=height,
         )
+        # shipment override already in cfg via RuntimeConfig
         created = await cdek.create_order(payload)
         created_uuid = created.uuid
         entity = await cdek.wait_order_ready(created.uuid)
@@ -460,8 +655,7 @@ async def order_create(
         await callback.message.edit_text(
             f"✅ Заказ <b>{our_number}</b> создан\n"
             f"Трек СДЭК: <code>{cdek_number or 'ожидается'}</code>\n"
-            f"UUID: <code>{created.uuid}</code>\n\n"
-            "Отправляю PDF…"
+            f"UUID: <code>{created.uuid}</code>\n\nОтправляю PDF…"
         )
         await callback.message.answer_document(
             FSInputFile(waybill_path, filename=waybill_path.name),
@@ -475,7 +669,6 @@ async def order_create(
         await state.clear()
     except Exception as exc:
         logger.exception("order create failed")
-        # Если заказ в СДЭК уже есть, не помечаем как полный провал — PDF можно добрать
         order_exists = bool(created_uuid)
         if our_number:
             try:
@@ -488,7 +681,6 @@ async def order_create(
                         db_order.cdek_uuid = created_uuid
                         db_order.error_message = str(exc)
                         if order_exists:
-                            # подтянем трек, если уже есть
                             try:
                                 entity = await cdek.get_order(created_uuid)
                                 db_order.cdek_number = (
@@ -507,8 +699,7 @@ async def order_create(
             await callback.message.edit_text(
                 f"⚠️ Заказ <b>{our_number}</b> создан в СДЭК, но PDF не готовы:\n"
                 f"<code>{exc}</code>\n\n"
-                f"Отправьте номер <code>{our_number}</code> чуть позже, "
-                "чтобы скачать накладную и штрихкоды."
+                f"Отправьте номер <code>{our_number}</code> позже для PDF."
             )
         else:
             await callback.message.edit_text(f"❌ Не удалось создать заказ: {exc}")

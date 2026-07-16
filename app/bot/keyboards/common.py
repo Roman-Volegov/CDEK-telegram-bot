@@ -8,7 +8,8 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📦 Рассчитать"), KeyboardButton(text="🚚 Создать заказ")],
-            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
     )
@@ -40,7 +41,47 @@ def confirm_order_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Создать заказ", callback_data="order:create"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="✏️ Изменить параметры", callback_data="order:edit"),
+    )
+    builder.row(
         InlineKeyboardButton(text="❌ Отмена", callback_data="order:cancel"),
+    )
+    return builder.as_markup()
+
+
+def edit_order_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📦 Габариты", callback_data="edit:dims"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="👤 Отправитель", callback_data="edit:sender"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📍 ПВЗ отправки", callback_data="edit:shipment"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ К подтверждению", callback_data="edit:back"),
+    )
+    return builder.as_markup()
+
+
+def yes_no_kb(prefix: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🚀 Prod", callback_data=f"{prefix}:no"),
+        InlineKeyboardButton(text="🧪 Тест", callback_data=f"{prefix}:yes"),
+    )
+    return builder.as_markup()
+
+
+def setup_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Сохранить", callback_data="setup:save"),
+        InlineKeyboardButton(text="🔄 Заново", callback_data="setup:restart"),
     )
     return builder.as_markup()
 

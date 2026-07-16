@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app.config import Settings
+from app.services.runtime import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ def _extract_house(value: str | None) -> str:
 
 
 class CdekClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: RuntimeConfig) -> None:
         self._settings = settings
         self._base = settings.cdek_base_url
         self._token: str | None = None

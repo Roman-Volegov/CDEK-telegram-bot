@@ -4,11 +4,12 @@ Telegram-бот для расчёта стоимости доставки СДЭ
 
 ## Что умеет
 
+- Мастер начальной настройки: каждый пользователь вводит свои секреты СДЭК/DaData и параметры отправки
+- Секреты хранятся в БД **зашифрованно** (Fernet, ключ `ENCRYPTION_KEY`) с привязкой к Telegram user id
 - Распознать адрес в свободной форме (DaData Clean)
 - Посчитать тарифы СДЭК (`/calculator/tarifflist`)
 - Создать заказ с номером своего нумератора `YYYY-NNNNNN` (например `2026-000001`)
-- Отгрузка только с вашего ПВЗ (`CDEK_SHIPMENT_POINT`)
-- Вес/габариты и название товара — из настроек; **стоимость товара** вводится в боте
+- Перед созданием можно изменить габариты, отправителя и ПВЗ отправки для текущего заказа
 - Наложенный платёж всегда `0`
 - После создания заказа присылает два PDF: накладная + штрихкоды
 
@@ -21,12 +22,11 @@ Telegram-бот для расчёта стоимости доставки СДЭ
 
 ## Быстрый старт (Docker)
 
-### 1. Подготовка ключей
+### 1. Подготовка
 
 1. Создайте бота в [@BotFather](https://t.me/BotFather) → получите `BOT_TOKEN`
-2. Зарегистрируйте интеграцию на [api.cdek.ru](https://api.cdek.ru/account) → `CDEK_CLIENT_ID`, `CDEK_CLIENT_SECRET`
-3. Зарегистрируйтесь на [dadata.ru](https://dadata.ru) → API-ключ и секретный ключ (для Clean)
-4. Узнайте код вашего ПВЗ сдачи в СДЭК (например `MSK90`)
+2. Сгенерируйте ключ шифрования (любая длинная случайная строка)
+3. Ключи СДЭК и DaData пользователи вводят сами в боте через `/setup`
 
 ### 2. Конфиг
 
@@ -39,23 +39,11 @@ cp .env.example .env
 
 ```env
 BOT_TOKEN=...
-CDEK_CLIENT_ID=...
-CDEK_CLIENT_SECRET=...
-CDEK_TEST_MODE=true
-CDEK_SHIPMENT_POINT=MSK90
-
-DADATA_API_KEY=...
-DADATA_SECRET_KEY=...
-
-DEFAULT_WEIGHT_G=100
-DEFAULT_LENGTH_CM=10
-DEFAULT_WIDTH_CM=10
-DEFAULT_HEIGHT_CM=5
-DEFAULT_ITEM_NAME=Товар
-DEFAULT_ITEM_WARE_KEY=ITEM-1
+ENCRYPTION_KEY=длинная-случайная-строка
+ALLOWED_TELEGRAM_IDS=123456789,@username
+DATABASE_URL=postgresql+asyncpg://cdek:cdek@db:5432/cdek_bot
+REDIS_URL=redis://redis:6379/0
 ```
-
-Для боевого контура СДЭК поставьте `CDEK_TEST_MODE=false`.
 
 ### 3. Сборка и запуск
 

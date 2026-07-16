@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.config import Settings
+from app.services.runtime import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class CleanAddress:
 
 
 class DaDataClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: RuntimeConfig) -> None:
         self._api_key = settings.dadata_api_key
         self._secret = settings.dadata_secret_key
         self._clean_url = "https://cleaner.dadata.ru/api/v1/clean/address"

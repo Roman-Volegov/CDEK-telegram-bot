@@ -1,39 +1,49 @@
+from __future__ import annotations
+
 import asyncio
 import logging
-from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.bot.handlers import setup_routers
+from app.bot.handlers import router
 from app.bot.middlewares import AccessControlMiddleware, ServicesMiddleware
 from app.config import get_settings
-from app.db.session import get_session_factory, init_db
-from app.services.cdek import CdekClient
-from app.services.dadata import DaDataClient
+from app.db.models import Base
+from app.services.crypto import SecretBox
+from app.services.profile import ProfileService
+
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
+async def init_db(engine) -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 async def main() -> None:
     settings = get_settings()
-    Path(settings.pdf_storage_path).mkdir(parents=True, exist_ok=True)
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    await init_db(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    await init_db()
-    logger.info("Database ready")
+    secret_box = SecretBox(settings.encryption_key)
+    profiles = ProfileService(secret_box)
 
-    try:
-        storage = RedisStorage.from_url(settings.redis_url)
-        logger.info("FSM storage: Redis")
-    except Exception:
-        logger.warning("Redis недоступен, используем MemoryStorage")
+    if settings.redis_url:
+        redis = Redis.from_url(settings.redis_url)
+        storage = RedisStorage(redis=redis)
+    else:
         storage = MemoryStorage()
 
     bot = Bot(
@@ -41,31 +51,16 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher(storage=storage)
-
-    cdek = CdekClient(settings)
-    dadata = DaDataClient(settings)
-    session_factory = get_session_factory()
     dp.update.middleware(AccessControlMiddleware(settings))
-    dp.update.middleware(ServicesMiddleware(settings, cdek, dadata, session_factory))
-    dp.include_router(setup_routers())
+    dp.update.middleware(ServicesMiddleware(settings, session_factory, profiles))
+    dp.include_router(router)
 
-    allowed_ids = settings.allowed_user_ids
-    allowed_names = settings.allowed_usernames
-    if allowed_ids or allowed_names:
-        logger.info(
-            "Access whitelist: %s id(s), %s username(s)",
-            len(allowed_ids),
-            len(allowed_names),
-        )
-    else:
-        logger.warning("ALLOWED_TELEGRAM_IDS пуст — бот доступен всем")
-
-    logger.info(
-        "Bot starting (CDEK %s, shipment_point=%s)",
-        "TEST" if settings.cdek_test_mode else "PROD",
-        settings.cdek_shipment_point,
-    )
-    await dp.start_polling(bot)
+    logger.info("Bot starting (polling)")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        await engine.dispose()
 
 
 if __name__ == "__main__":

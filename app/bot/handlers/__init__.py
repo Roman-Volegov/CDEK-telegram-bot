@@ -1,12 +1,11 @@
 from aiogram import Router
 
-from app.bot.handlers import calc, history, orders, start
+from app.bot.handlers import calc, history, orders, setup, start
 
 
-def setup_routers() -> Router:
-    root = Router()
-    root.include_router(start.router)
-    root.include_router(calc.router)
-    root.include_router(orders.router)
-    root.include_router(history.router)
-    return root
+router = Router()
+router.include_router(start.router)
+router.include_router(setup.router)
+router.include_router(calc.router)
+router.include_router(orders.router)
+router.include_router(history.router)

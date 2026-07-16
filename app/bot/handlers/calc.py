@@ -6,13 +6,13 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.deps import ensure_runtime
 from app.bot.keyboards.common import main_menu
 from app.bot.menu import MENU_TEXTS
 from app.bot.states import CalcStates
-from app.config import Settings
-from app.services.cdek import CdekClient
-from app.services.dadata import DaDataClient
+from app.services.profile import ProfileService
 
 logger = logging.getLogger(__name__)
 router = Router(name="calc")
@@ -20,8 +20,18 @@ router = Router(name="calc")
 
 @router.message(Command("calc"))
 @router.message(F.text == "📦 Рассчитать")
-async def calc_start(message: Message, state: FSMContext) -> None:
+async def calc_start(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     await state.clear()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory
+    )
+    if ready is None:
+        return
     await state.set_state(CalcStates.waiting_address)
     await message.answer(
         "Отправьте адрес доставки в любом формате.\n"
@@ -34,10 +44,16 @@ async def calc_start(message: Message, state: FSMContext) -> None:
 async def calc_address(
     message: Message,
     state: FSMContext,
-    dadata: DaDataClient,
-    cdek: CdekClient,
-    settings: Settings,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory
+    )
+    if ready is None:
+        return
+    cfg, cdek, dadata = ready
+
     raw = (message.text or "").strip()
     if not raw:
         await message.answer("Пришлите текстовый адрес.")
@@ -47,18 +63,9 @@ async def calc_address(
     try:
         clean = await dadata.clean_address(raw)
         city_name = clean.city_name
-        logger.info(
-            "DaData address: city=%r settlement=%r region=%r -> city_name=%r | %s",
-            clean.city,
-            clean.settlement,
-            clean.region,
-            city_name,
-            clean.display,
-        )
         if not city_name:
             await wait.edit_text(
-                "Не удалось определить город. Уточните адрес "
-                "(укажите город явно, например: <code>Санкт-Петербург, …</code>).\n"
+                "Не удалось определить город. Уточните адрес.\n"
                 f"Распознано: <code>{clean.display}</code>"
             )
             return
@@ -69,18 +76,17 @@ async def calc_address(
         if not cities:
             await wait.edit_text(
                 f"Город «{city_name}» не найден в справочнике СДЭК.\n"
-                f"Адрес: <code>{clean.display}</code>\n"
-                "Попробуйте указать город иначе или /calc заново."
+                f"Адрес: <code>{clean.display}</code>"
             )
             return
 
         city = cities[0]
         tariffs = await cdek.calculate_tariffs(
             to_city_code=city.code,
-            weight=settings.default_weight_g,
-            length=settings.default_length_cm,
-            width=settings.default_width_cm,
-            height=settings.default_height_cm,
+            weight=cfg.default_weight_g,
+            length=cfg.default_length_cm,
+            width=cfg.default_width_cm,
+            height=cfg.default_height_cm,
         )
         if not tariffs:
             await wait.edit_text("Тарифы не найдены для этого направления.")
@@ -90,9 +96,9 @@ async def calc_address(
         lines = [
             f"📍 <b>{clean.display}</b>",
             f"Город СДЭК: {city.city} ({city.region}), код {city.code}",
-            f"📦 {settings.default_weight_g} г, "
-            f"{settings.default_length_cm}×{settings.default_width_cm}×{settings.default_height_cm} см",
-            f"ПВЗ отгрузки: <code>{settings.cdek_shipment_point}</code>",
+            f"📦 {cfg.default_weight_g} г, "
+            f"{cfg.default_length_cm}×{cfg.default_width_cm}×{cfg.default_height_cm} см",
+            f"ПВЗ отгрузки: <code>{cfg.cdek_shipment_point}</code>",
             "",
             "<b>Тарифы:</b>",
         ]

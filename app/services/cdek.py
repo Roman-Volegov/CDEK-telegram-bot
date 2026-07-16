@@ -121,9 +121,14 @@ class CdekClient:
             return response.json()
 
     async def find_city(self, city: str, region: str | None = None) -> list[CityMatch]:
+        from app.services.dadata import normalize_locality
+
+        city = normalize_locality(city)
+        region_norm = normalize_locality(region) if region else ""
         params: dict[str, Any] = {"city": city, "size": 5}
-        if region:
-            params["region"] = region
+        # Для городов-регионов (СПб/Москва) region == city — фильтр мешает поиску
+        if region_norm and region_norm.casefold() != city.casefold():
+            params["region"] = region_norm
         data = await self._request("GET", "/location/cities", params=params)
         matches: list[CityMatch] = []
         for item in data or []:

@@ -136,3 +136,23 @@ def pvz_kb(points: list[PickupPoint], prefix: str = "pvz") -> InlineKeyboardMark
     )
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}:cancel"))
     return builder.as_markup()
+
+
+def history_order_kb(order_id: int, *, editable: bool, has_pdfs: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="ℹ️ Открыть", callback_data=f"hist:view:{order_id}"),
+    )
+    if editable:
+        builder.row(
+            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hist:edit:{order_id}"),
+            InlineKeyboardButton(text="🚫 Отменить", callback_data=f"hist:cancel:{order_id}"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"hist:delete:{order_id}"),
+        )
+    if has_pdfs:
+        builder.row(
+            InlineKeyboardButton(text="📄 PDF", callback_data=f"hist:pdf:{order_id}"),
+        )
+    return builder.as_markup()

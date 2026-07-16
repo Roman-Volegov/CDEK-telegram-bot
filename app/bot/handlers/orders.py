@@ -150,6 +150,69 @@ async def _show_tariffs_for_edit(
     )
 
 
+def order_is_local_editable(order: Order) -> bool:
+    return not order.cdek_uuid
+
+
+async def load_saved_order_for_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    order: Order,
+    *,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ready = await ensure_runtime(
+        callback,
+        state=state,
+        profiles=profiles,
+        session_factory=session_factory,
+    )
+    if ready is None:
+        return
+    cfg, _, dadata = ready
+    clean = await dadata.clean_address(order.to_address)
+    lat = float(clean.geo_lat) if clean.geo_lat else None
+    lon = float(clean.geo_lon) if clean.geo_lon else None
+
+    await state.clear()
+    await state.update_data(
+        editing_order_id=order.id,
+        editing_order_number=order.our_number,
+        from_edit_menu=False,
+        raw_address=order.to_address,
+        clean_address=clean.display,
+        city=clean.city_name,
+        region=clean.region,
+        postal_code=clean.postal_code,
+        street=clean.street,
+        house=clean.house,
+        geo_lat=lat,
+        geo_lon=lon,
+        to_city_code=order.to_city_code,
+        delivery_point=order.delivery_point,
+        delivery_point_address=order.delivery_point,
+        recipient_name=order.recipient_name,
+        recipient_phone=order.recipient_phone,
+        item_cost=float(order.item_cost),
+        chosen_tariff={
+            "tariff_code": int(order.tariff_code),
+            "tariff_name": order.tariff_name or f"Тариф {order.tariff_code}",
+            "delivery_mode": 2 if order.delivery_point else 1,
+            "delivery_sum": float(order.delivery_sum or 0),
+            "period_min": 0,
+            "period_max": 0,
+        },
+        override_item_name=cfg.default_item_name,
+    )
+    await state.set_state(OrderStates.confirm_order)
+    data = await state.get_data()
+    await callback.message.edit_text(
+        build_order_summary(cfg, data, float(order.item_cost)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
 @router.message(Command("order"))
 @router.message(F.text == "🚚 Создать заказ")
 async def order_start(
@@ -990,25 +1053,45 @@ async def order_create(
     our_number: str | None = None
     created_uuid: str | None = None
     weight, length, width, height = effective_package(cfg, data)
+    editing_order_id = data.get("editing_order_id")
 
     try:
         async with session_factory() as session:
-            our_number = await next_order_number(session)
-            order = Order(
-                our_number=our_number,
-                telegram_user_id=callback.from_user.id,
-                status="pending",
-                tariff_code=int(tariff["tariff_code"]),
-                tariff_name=tariff.get("tariff_name"),
-                to_address=data.get("clean_address") or "",
-                to_city_code=int(data["to_city_code"]),
-                delivery_point=data.get("delivery_point"),
-                recipient_name=data["recipient_name"],
-                recipient_phone=data["recipient_phone"],
-                item_cost=float(data["item_cost"]),
-                delivery_sum=float(tariff.get("delivery_sum") or 0),
-            )
-            session.add(order)
+            order: Order | None = None
+            if editing_order_id:
+                result = await session.execute(
+                    select(Order).where(
+                        Order.id == int(editing_order_id),
+                        Order.telegram_user_id == callback.from_user.id,
+                    )
+                )
+                order = result.scalar_one_or_none()
+                if order is None or order.cdek_uuid:
+                    raise RuntimeError("Этот заказ уже отправлен в работу и недоступен для редактирования.")
+                our_number = order.our_number
+            else:
+                our_number = await next_order_number(session)
+                order = Order(
+                    our_number=our_number,
+                    telegram_user_id=callback.from_user.id,
+                )
+                session.add(order)
+
+            order.status = "pending"
+            order.tariff_code = int(tariff["tariff_code"])
+            order.tariff_name = tariff.get("tariff_name")
+            order.to_address = data.get("clean_address") or ""
+            order.to_city_code = int(data["to_city_code"])
+            order.delivery_point = data.get("delivery_point")
+            order.recipient_name = data["recipient_name"]
+            order.recipient_phone = data["recipient_phone"]
+            order.item_cost = float(data["item_cost"])
+            order.delivery_sum = float(tariff.get("delivery_sum") or 0)
+            order.error_message = None
+            order.cdek_uuid = None
+            order.cdek_number = None
+            order.waybill_path = None
+            order.barcode_path = None
             await session.commit()
 
         payload = cdek.build_order_payload(

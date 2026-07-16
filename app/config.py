@@ -13,8 +13,9 @@ class Settings(BaseSettings):
 
     bot_token: str = Field(alias="BOT_TOKEN")
 
-    # Список Telegram user id через запятую. Пусто = доступ открыт всем.
-    # Пример: ALLOWED_TELEGRAM_IDS=123456789,987654321
+    # Whitelist: Telegram user id и/или @username через запятую.
+    # Пусто = доступ открыт всем.
+    # Пример: ALLOWED_TELEGRAM_IDS=123456789,@RomanVolegov,IraVolego
     allowed_telegram_ids: str = Field(default="", alias="ALLOWED_TELEGRAM_IDS")
 
     cdek_client_id: str = Field(alias="CDEK_CLIENT_ID")

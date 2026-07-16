@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app.bot.keyboards.common import main_menu
+from app.bot.menu import MENU_TEXTS
 from app.bot.states import CalcStates
 from app.config import Settings
 from app.services.cdek import CdekClient
@@ -29,7 +30,7 @@ async def calc_start(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(CalcStates.waiting_address, F.text)
+@router.message(CalcStates.waiting_address, F.text, ~F.text.in_(MENU_TEXTS))
 async def calc_address(
     message: Message,
     state: FSMContext,

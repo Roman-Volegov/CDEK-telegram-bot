@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -20,8 +21,10 @@ router = Router(name="history")
 @router.message(F.text == "📋 Мои заказы")
 async def list_orders(
     message: Message,
+    state: FSMContext,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    await state.clear()
     async with session_factory() as session:
         result = await session.execute(
             select(Order)

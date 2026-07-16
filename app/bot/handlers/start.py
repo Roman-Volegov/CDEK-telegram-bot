@@ -34,7 +34,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("help"))
 @router.message(F.text == "ℹ️ Помощь")
-async def cmd_help(message: Message) -> None:
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(HELP_TEXT, reply_markup=main_menu())
 
 

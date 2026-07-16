@@ -18,6 +18,7 @@ from app.bot.keyboards.common import (
     pvz_kb,
     tariffs_kb,
 )
+from app.bot.menu import MENU_TEXTS
 from app.bot.states import OrderStates
 from app.config import Settings
 from app.db.models import Order
@@ -54,7 +55,7 @@ async def order_start(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(OrderStates.waiting_address, F.text)
+@router.message(OrderStates.waiting_address, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_address(
     message: Message,
     state: FSMContext,
@@ -307,7 +308,7 @@ async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(OrderStates.waiting_pvz, F.text)
+@router.message(OrderStates.waiting_pvz, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_pvz(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip().upper()
     if len(code) < 3:
@@ -318,7 +319,7 @@ async def order_pvz(message: Message, state: FSMContext) -> None:
     await message.answer("Введите ФИО получателя:")
 
 
-@router.message(OrderStates.waiting_name, F.text)
+@router.message(OrderStates.waiting_name, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if len(name) < 3:
@@ -329,7 +330,7 @@ async def order_name(message: Message, state: FSMContext) -> None:
     await message.answer("Введите телефон получателя (+79001234567):")
 
 
-@router.message(OrderStates.waiting_phone, F.text)
+@router.message(OrderStates.waiting_phone, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_phone(message: Message, state: FSMContext) -> None:
     phone = _normalize_phone(message.text or "")
     if not PHONE_RE.match(phone):
@@ -343,7 +344,7 @@ async def order_phone(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(OrderStates.waiting_item_cost, F.text)
+@router.message(OrderStates.waiting_item_cost, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_item_cost(message: Message, state: FSMContext, settings: Settings) -> None:
     raw = (message.text or "").replace(",", ".").strip()
     try:

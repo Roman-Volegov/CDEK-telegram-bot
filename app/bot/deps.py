@@ -42,6 +42,7 @@ def order_overrides_from_state(data: dict) -> dict:
         "override_sender_name": "cdek_sender_name",
         "override_sender_phone": "cdek_sender_phone",
         "override_shipment_point": "cdek_shipment_point",
+        "override_item_name": "default_item_name",
     }
     out: dict = {}
     for src, dst in mapping.items():
@@ -59,26 +60,34 @@ def effective_package(cfg: RuntimeConfig, data: dict) -> tuple[int, int, int, in
     )
 
 
+def effective_item_name(cfg: RuntimeConfig, data: dict) -> str:
+    return str(data.get("override_item_name") or cfg.default_item_name)
+
+
 def build_order_summary(cfg: RuntimeConfig, data: dict, cost: float) -> str:
     tariff = data["chosen_tariff"]
     pvz = data.get("delivery_point")
     pvz_addr = data.get("delivery_point_address")
+    address = data.get("clean_address") or data.get("raw_address") or "—"
     if pvz:
-        dest = f"ПВЗ {pvz}" + (f" — {pvz_addr}" if pvz_addr else "")
+        dest = f"{address}\nПВЗ получения: <code>{pvz}</code>"
+        if pvz_addr:
+            dest += f" — {pvz_addr}"
     else:
-        dest = data.get("clean_address")
+        dest = address
 
     weight, length, width, height = effective_package(cfg, data)
     sender_name = data.get("override_sender_name") or cfg.cdek_sender_name
     sender_phone = data.get("override_sender_phone") or cfg.cdek_sender_phone
     shipment = data.get("override_shipment_point") or cfg.cdek_shipment_point
+    item_name = effective_item_name(cfg, data)
 
     return (
         "<b>Проверьте заказ</b>\n\n"
         f"Куда: {dest}\n"
         f"Тариф: {tariff['tariff_name']} — {tariff['delivery_sum']:.0f} ₽\n"
         f"Получатель: {data['recipient_name']}, {data['recipient_phone']}\n"
-        f"Товар: {cfg.default_item_name}, cost={cost:.0f} ₽, НП=0\n"
+        f"Товар: {item_name}, cost={cost:.0f} ₽, НП=0\n"
         f"Место: {weight} г, {length}×{width}×{height} см\n"
         f"Отправитель / seller: {sender_name}, {sender_phone}\n"
         f"Отгрузка: ПВЗ {shipment}\n"

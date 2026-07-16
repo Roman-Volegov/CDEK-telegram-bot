@@ -17,6 +17,7 @@ from app.bot.deps import (
     ensure_runtime,
     order_overrides_from_state,
 )
+from app.services.runtime import RuntimeConfig
 from app.bot.keyboards.common import (
     confirm_address_kb,
     confirm_order_kb,
@@ -50,6 +51,105 @@ def _normalize_phone(raw: str) -> str:
     return digits
 
 
+def _tariff_to_pvz(data: dict) -> bool:
+    chosen = data.get("chosen_tariff") or {}
+    mode = int(chosen.get("delivery_mode") or 0)
+    return mode in (2, 4)
+
+
+def _can_return_to_confirm(data: dict) -> bool:
+    return bool(
+        data.get("from_edit_menu")
+        and data.get("recipient_name")
+        and data.get("recipient_phone")
+        and data.get("item_cost") is not None
+        and data.get("chosen_tariff")
+        and data.get("to_city_code")
+    )
+
+
+async def _return_to_confirm_message(
+    message: Message,
+    state: FSMContext,
+    cfg: RuntimeConfig,
+) -> None:
+    data = await state.get_data()
+    await state.update_data(from_edit_menu=False)
+    await state.set_state(OrderStates.confirm_order)
+    await message.answer(
+        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
+async def _return_to_confirm_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    cfg: RuntimeConfig,
+) -> None:
+    data = await state.get_data()
+    await state.update_data(from_edit_menu=False)
+    await state.set_state(OrderStates.confirm_order)
+    await callback.message.edit_text(
+        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
+        reply_markup=confirm_order_kb(),
+    )
+
+
+async def _show_tariffs_for_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+    prompt: str,
+) -> None:
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        callback,
+        state=state,
+        profiles=profiles,
+        session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, cdek, _ = ready
+    city_code = data.get("to_city_code")
+    if not city_code:
+        await callback.message.edit_text("Сначала укажите адрес доставки.")
+        return
+    weight, length, width, height = effective_package(cfg, data)
+    tariffs = await cdek.calculate_tariffs(
+        to_city_code=int(city_code),
+        weight=weight,
+        length=length,
+        width=width,
+        height=height,
+    )
+    if not tariffs:
+        await callback.message.edit_text("Тарифы не найдены для текущего адреса/габаритов.")
+        return
+    serialized = [
+        {
+            "tariff_code": t.tariff_code,
+            "tariff_name": t.tariff_name,
+            "delivery_mode": t.delivery_mode,
+            "delivery_sum": t.delivery_sum,
+            "period_min": t.period_min,
+            "period_max": t.period_max,
+        }
+        for t in tariffs[:10]
+    ]
+    await state.update_data(tariffs=serialized, from_edit_menu=True)
+    await state.set_state(OrderStates.choose_tariff)
+    lines = [prompt] + [f"• {t.label()}" for t in tariffs[:10]]
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=tariffs_kb(tariffs, prefix="otariff"),
+    )
+
+
 @router.message(Command("order"))
 @router.message(F.text == "🚚 Создать заказ")
 async def order_start(
@@ -72,6 +172,7 @@ async def order_start(
 
 
 @router.message(OrderStates.waiting_address, F.text, ~F.text.in_(MENU_TEXTS))
+@router.message(OrderStates.edit_address, F.text, ~F.text.in_(MENU_TEXTS))
 async def order_address(
     message: Message,
     state: FSMContext,
@@ -100,6 +201,8 @@ async def order_address(
             house=clean.house,
             geo_lat=lat,
             geo_lon=lon,
+            delivery_point=None,
+            delivery_point_address=None,
         )
         await state.set_state(OrderStates.confirm_address)
         await wait.edit_text(
@@ -113,7 +216,11 @@ async def order_address(
 
 @router.callback_query(OrderStates.confirm_address, F.data == "addr:retry")
 async def order_address_retry(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(OrderStates.waiting_address)
+    data = await state.get_data()
+    if data.get("from_edit_menu"):
+        await state.set_state(OrderStates.edit_address)
+    else:
+        await state.set_state(OrderStates.waiting_address)
     await callback.message.edit_text("Пришлите адрес ещё раз.")
     await callback.answer()
 
@@ -216,6 +323,23 @@ async def order_tariff_chosen(
     await state.update_data(chosen_tariff=chosen)
     tariff = TariffOption(**chosen)
     if not tariff.to_pvz:
+        await state.update_data(delivery_point=None, delivery_point_address=None)
+        data = await state.get_data()
+        if _can_return_to_confirm(data):
+            ready = await ensure_runtime(
+                callback,
+                state=state,
+                profiles=profiles,
+                session_factory=session_factory,
+                overrides=order_overrides_from_state(data),
+            )
+            if ready is None:
+                await callback.answer()
+                return
+            cfg, _, _ = ready
+            await _return_to_confirm_callback(callback, state, cfg)
+            await callback.answer()
+            return
         await state.set_state(OrderStates.waiting_name)
         await callback.message.edit_text(
             f"Тариф: <b>{tariff.tariff_name}</b>\nВведите ФИО получателя:"
@@ -305,7 +429,12 @@ async def order_pvz_manual(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(OrderStates.choose_pvz, F.data.startswith("pvz:"))
-async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+async def order_pvz_chosen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     idx_raw = (callback.data or "").split(":")[-1]
     if not idx_raw.isdigit():
         await callback.answer()
@@ -321,6 +450,22 @@ async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
         delivery_point=point["code"],
         delivery_point_address=point.get("address") or point.get("address_full"),
     )
+    data = await state.get_data()
+    if _can_return_to_confirm(data):
+        ready = await ensure_runtime(
+            callback,
+            state=state,
+            profiles=profiles,
+            session_factory=session_factory,
+            overrides=order_overrides_from_state(data),
+        )
+        if ready is None:
+            await callback.answer()
+            return
+        cfg, _, _ = ready
+        await _return_to_confirm_callback(callback, state, cfg)
+        await callback.answer()
+        return
     await state.set_state(OrderStates.waiting_name)
     await callback.message.edit_text(
         f"ПВЗ: <b>{point['code']}</b>\n{point.get('address') or ''}\n\n"
@@ -330,12 +475,32 @@ async def order_pvz_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(OrderStates.waiting_pvz, F.text, ~F.text.in_(MENU_TEXTS))
-async def order_pvz(message: Message, state: FSMContext) -> None:
+@router.message(OrderStates.edit_delivery_pvz, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_pvz(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     code = (message.text or "").strip().upper()
     if len(code) < 3:
         await message.answer("Код ПВЗ слишком короткий.")
         return
     await state.update_data(delivery_point=code, delivery_point_address=None)
+    data = await state.get_data()
+    if _can_return_to_confirm(data):
+        ready = await ensure_runtime(
+            message,
+            state=state,
+            profiles=profiles,
+            session_factory=session_factory,
+            overrides=order_overrides_from_state(data),
+        )
+        if ready is None:
+            return
+        cfg, _, _ = ready
+        await _return_to_confirm_message(message, state, cfg)
+        return
     await state.set_state(OrderStates.waiting_name)
     await message.answer("Введите ФИО получателя:")
 
@@ -412,10 +577,11 @@ async def order_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(OrderStates.confirm_order, F.data == "order:edit")
 async def order_edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
     await state.set_state(OrderStates.edit_menu)
     await callback.message.edit_text(
         "Что изменить для <b>этого</b> заказа?",
-        reply_markup=edit_order_kb(),
+        reply_markup=edit_order_kb(show_delivery_pvz=_tariff_to_pvz(data)),
     )
     await callback.answer()
 
@@ -440,12 +606,253 @@ async def order_edit_back(
     await callback.answer()
 
 
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:address")
+async def order_edit_address(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(from_edit_menu=True)
+    await state.set_state(OrderStates.edit_address)
+    await callback.message.edit_text(
+        "Введите новый адрес доставки в любом формате.\n"
+        "После подтверждения адреса нужно будет заново выбрать тариф."
+    )
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:tariff")
+async def order_edit_tariff(
+    callback: CallbackQuery,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    try:
+        await _show_tariffs_for_edit(
+            callback,
+            state,
+            profiles=profiles,
+            session_factory=session_factory,
+            prompt="Выберите новый тариф:",
+        )
+    except Exception as exc:
+        logger.exception("edit tariff failed")
+        await callback.message.edit_text(f"Не удалось пересчитать тарифы: {exc}")
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:delivery_pvz")
+async def order_edit_delivery_pvz(
+    callback: CallbackQuery,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    data = await state.get_data()
+    if not _tariff_to_pvz(data):
+        await callback.answer("Для выбранного тарифа ПВЗ получения не нужен", show_alert=True)
+        return
+    await state.update_data(from_edit_menu=True)
+    await callback.message.edit_text("🔍 Ищу ПВЗ СДЭК по адресу…")
+    ready = await ensure_runtime(
+        callback,
+        state=state,
+        profiles=profiles,
+        session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    _, cdek, _ = ready
+    try:
+        points, kind = await cdek.find_pvz_for_address(
+            city_code=int(data["to_city_code"]),
+            address=data.get("clean_address") or "",
+            street=data.get("street"),
+            house=data.get("house"),
+            postal_code=data.get("postal_code"),
+            latitude=data.get("geo_lat"),
+            longitude=data.get("geo_lon"),
+            limit=8,
+        )
+    except Exception as exc:
+        logger.exception("edit pvz search failed")
+        await state.set_state(OrderStates.edit_delivery_pvz)
+        await callback.message.edit_text(
+            f"Не удалось подобрать ПВЗ: {exc}\nВведите код ПВЗ вручную:"
+        )
+        await callback.answer()
+        return
+
+    if not points:
+        await state.set_state(OrderStates.edit_delivery_pvz)
+        await callback.message.edit_text("ПВЗ не найдены. Введите код ПВЗ вручную:")
+        await callback.answer()
+        return
+
+    serialized = [
+        {
+            "code": p.code,
+            "name": p.name,
+            "address": p.address,
+            "address_full": p.address_full,
+            "distance_km": p.distance_km,
+            "work_time": p.work_time,
+            "match_kind": p.match_kind,
+        }
+        for p in points
+    ]
+    await state.update_data(pvz_options=serialized)
+    await state.set_state(OrderStates.choose_pvz)
+    header = (
+        "📍 Нашёл ПВЗ по адресу:"
+        if kind == "exact"
+        else "📍 Точного ПВЗ нет. Ближайшие:"
+    )
+    lines = [header, ""]
+    for p in points:
+        dist = f" (~{p.distance_km:.1f} км)" if p.distance_km is not None else ""
+        lines.append(f"• <b>{p.code}</b> — {p.address}{dist}")
+    await callback.message.edit_text("\n".join(lines), reply_markup=pvz_kb(points, prefix="pvz"))
+    await callback.answer()
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:recipient")
+async def order_edit_recipient(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    current = data.get("recipient_name") or "—"
+    await state.set_state(OrderStates.edit_recipient_name)
+    await callback.message.edit_text(
+        f"Текущий получатель: <b>{current}</b>\n\nВведите новое ФИО получателя:"
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_recipient_name, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_recipient_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if len(name) < 3:
+        await message.answer("Укажите полное ФИО.")
+        return
+    await state.update_data(recipient_name=name)
+    await state.set_state(OrderStates.edit_recipient_phone)
+    await message.answer("Телефон получателя (+79001234567):")
+
+
+@router.message(OrderStates.edit_recipient_phone, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_recipient_phone(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = _normalize_phone(message.text or "")
+    if not PHONE_RE.match(phone):
+        await message.answer("Некорректный телефон. Пример: +79001234567")
+        return
+    await state.update_data(recipient_phone=phone)
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await _return_to_confirm_message(message, state, cfg)
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:item_cost")
+async def order_edit_item_cost(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    current = data.get("item_cost")
+    await state.set_state(OrderStates.edit_item_cost)
+    await callback.message.edit_text(
+        f"Текущая стоимость: <b>{float(current or 0):.0f} ₽</b>\n\n"
+        "Введите новую стоимость товара (₽). НП останется 0."
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_item_cost, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_item_cost_value(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw = (message.text or "").replace(",", ".").strip()
+    try:
+        cost = float(raw)
+        if cost < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите число, например 1500")
+        return
+    await state.update_data(item_cost=cost)
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await _return_to_confirm_message(message, state, cfg)
+
+
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:item_name")
+async def order_edit_item_name(
+    callback: CallbackQuery,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        callback, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        await callback.answer()
+        return
+    cfg, _, _ = ready
+    current = data.get("override_item_name") or cfg.default_item_name
+    await state.set_state(OrderStates.edit_item_name)
+    await callback.message.edit_text(
+        f"Текущее название: <b>{current}</b>\n\nВведите новое название товара в накладной:"
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_item_name, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_item_name_value(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    value = (message.text or "").strip()
+    if len(value) < 2:
+        await message.answer("Укажите название товара.")
+        return
+    await state.update_data(override_item_name=value)
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await _return_to_confirm_message(message, state, cfg)
+
+
 @router.callback_query(OrderStates.edit_menu, F.data == "edit:dims")
 async def order_edit_dims(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderStates.edit_dimensions)
     await callback.message.edit_text(
         "Введите габариты: <b>вес_г длина ширина высота</b>\n"
-        "Пример: <code>100 10 10 5</code>"
+        "Пример: <code>100 10 10 5</code>\n\n"
+        "После смены габаритов можно заново выбрать тариф в меню редактирования."
     )
     await callback.answer()
 
@@ -482,11 +889,7 @@ async def order_edit_dims_value(
     if ready is None:
         return
     cfg, _, _ = ready
-    await state.set_state(OrderStates.confirm_order)
-    await message.answer(
-        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
-        reply_markup=confirm_order_kb(),
-    )
+    await _return_to_confirm_message(message, state, cfg)
 
 
 @router.callback_query(OrderStates.edit_menu, F.data == "edit:sender")
@@ -527,11 +930,7 @@ async def order_edit_sender_phone(
     if ready is None:
         return
     cfg, _, _ = ready
-    await state.set_state(OrderStates.confirm_order)
-    await message.answer(
-        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
-        reply_markup=confirm_order_kb(),
-    )
+    await _return_to_confirm_message(message, state, cfg)
 
 
 @router.callback_query(OrderStates.edit_menu, F.data == "edit:shipment")
@@ -563,11 +962,7 @@ async def order_edit_shipment_value(
     if ready is None:
         return
     cfg, _, _ = ready
-    await state.set_state(OrderStates.confirm_order)
-    await message.answer(
-        build_order_summary(cfg, data, float(data.get("item_cost") or 0)),
-        reply_markup=confirm_order_kb(),
-    )
+    await _return_to_confirm_message(message, state, cfg)
 
 
 @router.callback_query(OrderStates.confirm_order, F.data == "order:create")

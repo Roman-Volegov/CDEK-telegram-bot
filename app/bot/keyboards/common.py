@@ -76,16 +76,27 @@ def confirm_order_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def edit_order_kb() -> InlineKeyboardMarkup:
+def edit_order_kb(*, show_delivery_pvz: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
+        InlineKeyboardButton(text="📍 Адрес доставки", callback_data="edit:address"),
+        InlineKeyboardButton(text="🚚 Тариф", callback_data="edit:tariff"),
+    )
+    if show_delivery_pvz:
+        builder.row(
+            InlineKeyboardButton(text="🏬 ПВЗ получения", callback_data="edit:delivery_pvz"),
+        )
+    builder.row(
+        InlineKeyboardButton(text="🧍 Получатель", callback_data="edit:recipient"),
+        InlineKeyboardButton(text="💰 Стоимость товара", callback_data="edit:item_cost"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🏷 Название товара", callback_data="edit:item_name"),
         InlineKeyboardButton(text="📦 Габариты", callback_data="edit:dims"),
     )
     builder.row(
         InlineKeyboardButton(text="👤 Отправитель", callback_data="edit:sender"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="📍 ПВЗ отправки", callback_data="edit:shipment"),
+        InlineKeyboardButton(text="📤 ПВЗ отправки", callback_data="edit:shipment"),
     )
     builder.row(
         InlineKeyboardButton(text="⬅️ К подтверждению", callback_data="edit:back"),

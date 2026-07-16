@@ -385,6 +385,28 @@ class CdekClient:
         data = await self._request("GET", f"/orders/{order_uuid}")
         return data.get("entity") or {}
 
+    @staticmethod
+    def latest_status_label(entity: dict[str, Any] | None) -> str | None:
+        """Актуальный статус заказа из ответа СДЭК."""
+        if not entity:
+            return None
+        statuses = entity.get("statuses") or []
+        if not statuses:
+            return None
+        latest = max(
+            statuses,
+            key=lambda s: str(s.get("date_time") or ""),
+        )
+        name = str(latest.get("name") or "").strip()
+        code = str(latest.get("code") or "").strip()
+        if name and code and code not in name:
+            return f"{name} ({code})"
+        return name or code or None
+
+    async def get_order_status_label(self, order_uuid: str) -> str | None:
+        entity = await self.get_order(order_uuid)
+        return self.latest_status_label(entity)
+
     async def wait_order_ready(
         self, order_uuid: str, *, attempts: int = 30, delay: float = 1.5
     ) -> dict[str, Any]:

@@ -138,11 +138,49 @@ def pvz_kb(points: list[PickupPoint], prefix: str = "pvz") -> InlineKeyboardMark
     return builder.as_markup()
 
 
-def history_order_kb(order_id: int, *, editable: bool, has_pdfs: bool) -> InlineKeyboardMarkup:
+def history_page_kb(
+    page: int,
+    total: int,
+    order_ids: list[int],
+    *,
+    page_size: int = 3,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="ℹ️ Открыть", callback_data=f"hist:view:{order_id}"),
-    )
+    for idx, order_id in enumerate(order_ids, start=1):
+        builder.row(
+            InlineKeyboardButton(
+                text=f"Открыть {idx}",
+                callback_data=f"hist:view:{order_id}:{page}",
+            )
+        )
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️ Предыдущие 3",
+                callback_data=f"hist:page:{page - 1}",
+            )
+        )
+    if (page + 1) * page_size < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="Следующие 3 ▶️",
+                callback_data=f"hist:page:{page + 1}",
+            )
+        )
+    if nav:
+        builder.row(*nav)
+    return builder.as_markup()
+
+
+def history_order_kb(
+    order_id: int,
+    *,
+    editable: bool,
+    has_pdfs: bool,
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
     if editable:
         builder.row(
             InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hist:edit:{order_id}"),
@@ -155,4 +193,7 @@ def history_order_kb(order_id: int, *, editable: bool, has_pdfs: bool) -> Inline
         builder.row(
             InlineKeyboardButton(text="📄 PDF", callback_data=f"hist:pdf:{order_id}"),
         )
+    builder.row(
+        InlineKeyboardButton(text="⬅️ К списку", callback_data=f"hist:page:{page}"),
+    )
     return builder.as_markup()

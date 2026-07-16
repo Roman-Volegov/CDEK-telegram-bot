@@ -58,6 +58,27 @@ class UserSettings(Base):
     )
 
 
+class BotAccess(Base):
+    """Заявки и статусы доступа пользователей к боту."""
+
+    __tablename__ = "bot_access"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # pending | approved | rejected
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by_admin_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class UserProfile(Base):
     """Настройки и зашифрованные секреты пользователя Telegram."""
 

@@ -6,13 +6,51 @@ from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.services.crypto import SecretBox
+from app.services.access import AccessService
 from app.services.profile import ProfileService
 
 
+def _extract_user_event(event: TelegramObject) -> tuple[Message | CallbackQuery | None, Any]:
+    if isinstance(event, Update):
+        if event.message:
+            return event.message, event.message.from_user
+        if event.callback_query:
+            return event.callback_query, event.callback_query.from_user
+        return None, None
+    if isinstance(event, Message):
+        return event, event.from_user
+    if isinstance(event, CallbackQuery):
+        return event, event.from_user
+    return None, None
+
+
+def _is_access_flow(event: Message | CallbackQuery | None) -> bool:
+    """События, которые можно обрабатывать без approved-статуса."""
+    if event is None:
+        return False
+    if isinstance(event, CallbackQuery):
+        data = event.data or ""
+        return data.startswith("access:")
+    text = (event.text or "").strip()
+    if not text:
+        return False
+    if text.startswith("/start") or text.startswith("/id") or text.startswith("/request_access"):
+        return True
+    if text in {"🔑 Запросить доступ", "ℹ️ Помощь", "/help"}:
+        return True
+    return False
+
+
 class AccessControlMiddleware(BaseMiddleware):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        session_factory: async_sessionmaker[AsyncSession],
+        access: AccessService,
+    ) -> None:
         self.settings = settings
+        self.session_factory = session_factory
+        self.access = access
 
     async def __call__(
         self,
@@ -20,33 +58,37 @@ class AccessControlMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        user = data.get("event_from_user")
-        user_id = user.id if user else None
-        username = user.username if user else None
-
-        if self.settings.is_user_allowed(user_id, username):
+        tg_event, user = _extract_user_event(event)
+        if user is None:
             return await handler(event, data)
 
-        uname = f"@{username}" if username else "—"
-        text = (
-            "⛔ Бот доступен только авторизованным пользователям.\n"
-            f"Ваш Telegram ID: <code>{user_id}</code>\n"
-            f"Username: {uname}\n"
-            "Передайте это администратору."
+        decision = await self.access.evaluate(
+            self.session_factory,
+            user.id,
+            user.username,
+            getattr(user, "full_name", None),
         )
-        if isinstance(event, Update):
-            if event.message:
-                await event.message.answer(text)
-            elif event.callback_query:
-                await event.callback_query.answer("Нет доступа", show_alert=True)
-                if event.callback_query.message:
-                    await event.callback_query.message.answer(text)
-        elif isinstance(event, Message):
-            await event.answer(text)
-        elif isinstance(event, CallbackQuery):
-            await event.answer("Нет доступа", show_alert=True)
-            if event.message:
-                await event.message.answer(text)
+        data["access_decision"] = decision
+        data["access"] = self.access
+
+        if decision.allowed:
+            return await handler(event, data)
+
+        # Админские callback'и и поток запроса доступа
+        if _is_access_flow(tg_event):
+            return await handler(event, data)
+
+        # Остальное блокируем короткой подсказкой
+        text = (
+            "⛔ Доступ к боту ещё не разрешён.\n"
+            "Нажмите /start и запросите разрешение у администратора."
+        )
+        if isinstance(tg_event, CallbackQuery):
+            await tg_event.answer("Нет доступа", show_alert=True)
+            if tg_event.message:
+                await tg_event.message.answer(text)
+        elif isinstance(tg_event, Message):
+            await tg_event.answer(text)
         return None
 
 
@@ -56,10 +98,12 @@ class ServicesMiddleware(BaseMiddleware):
         settings: Settings,
         session_factory: async_sessionmaker[AsyncSession],
         profiles: ProfileService,
+        access: AccessService,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.profiles = profiles
+        self.access = access
 
     async def __call__(
         self,
@@ -70,4 +114,5 @@ class ServicesMiddleware(BaseMiddleware):
         data["settings"] = self.settings
         data["session_factory"] = self.session_factory
         data["profiles"] = self.profiles
+        data["access"] = self.access
         return await handler(event, data)

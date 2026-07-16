@@ -15,6 +15,7 @@ from app.bot.handlers import router
 from app.bot.middlewares import AccessControlMiddleware, ServicesMiddleware
 from app.config import get_settings
 from app.db.models import Base
+from app.services.access import AccessService
 from app.services.crypto import SecretBox
 from app.services.profile import ProfileService
 
@@ -39,6 +40,10 @@ async def main() -> None:
 
     secret_box = SecretBox(settings.encryption_key)
     profiles = ProfileService(secret_box)
+    access = AccessService(settings)
+    bootstrapped = await access.ensure_bootstrap_admins(session_factory)
+    if bootstrapped:
+        logger.info("Bootstrapped %s approved/admin access records", bootstrapped)
 
     if settings.redis_url:
         redis = Redis.from_url(settings.redis_url)
@@ -51,9 +56,15 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher(storage=storage)
-    dp.update.middleware(AccessControlMiddleware(settings))
-    dp.update.middleware(ServicesMiddleware(settings, session_factory, profiles))
+    dp.update.middleware(AccessControlMiddleware(settings, session_factory, access))
+    dp.update.middleware(ServicesMiddleware(settings, session_factory, profiles, access))
     dp.include_router(router)
+
+    if not settings.admin_user_ids and not settings.admin_usernames:
+        logger.warning(
+            "ADMIN_TELEGRAM_IDS / ALLOWED_TELEGRAM_IDS пусты — "
+            "заявки на доступ некому отправлять"
+        )
 
     logger.info("Bot starting (polling)")
     try:

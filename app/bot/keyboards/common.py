@@ -15,6 +15,31 @@ def main_menu() -> ReplyKeyboardMarkup:
     )
 
 
+def request_access_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔑 Запросить доступ")],
+            [KeyboardButton(text="ℹ️ Помощь")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def admin_access_kb(user_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Подтвердить",
+            callback_data=f"access:approve:{user_id}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отклонить",
+            callback_data=f"access:reject:{user_id}",
+        ),
+    )
+    return builder.as_markup()
+
+
 def confirm_address_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(

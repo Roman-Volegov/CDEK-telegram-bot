@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 
 from app.bot.handlers import setup_routers
-from app.bot.middlewares import ServicesMiddleware
+from app.bot.middlewares import AccessControlMiddleware, ServicesMiddleware
 from app.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.services.cdek import CdekClient
@@ -45,8 +45,15 @@ async def main() -> None:
     cdek = CdekClient(settings)
     dadata = DaDataClient(settings)
     session_factory = get_session_factory()
+    dp.update.middleware(AccessControlMiddleware(settings))
     dp.update.middleware(ServicesMiddleware(settings, cdek, dadata, session_factory))
     dp.include_router(setup_routers())
+
+    allowed = settings.allowed_user_ids
+    if allowed:
+        logger.info("Access whitelist enabled: %s user(s)", len(allowed))
+    else:
+        logger.warning("ALLOWED_TELEGRAM_IDS пуст — бот доступен всем")
 
     logger.info(
         "Bot starting (CDEK %s, shipment_point=%s)",

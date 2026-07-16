@@ -41,6 +41,16 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu())
 
 
+@router.message(Command("id"))
+async def cmd_id(message: Message) -> None:
+    """Показать свой Telegram ID (удобно для whitelist)."""
+    user = message.from_user
+    await message.answer(
+        f"Ваш Telegram ID: <code>{user.id if user else '—'}</code>\n"
+        f"Username: @{user.username if user and user.username else '—'}"
+    )
+
+
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()

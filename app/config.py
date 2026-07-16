@@ -13,6 +13,10 @@ class Settings(BaseSettings):
 
     bot_token: str = Field(alias="BOT_TOKEN")
 
+    # Список Telegram user id через запятую. Пусто = доступ открыт всем.
+    # Пример: ALLOWED_TELEGRAM_IDS=123456789,987654321
+    allowed_telegram_ids: str = Field(default="", alias="ALLOWED_TELEGRAM_IDS")
+
     cdek_client_id: str = Field(alias="CDEK_CLIENT_ID")
     cdek_client_secret: str = Field(alias="CDEK_CLIENT_SECRET")
     cdek_test_mode: bool = Field(default=True, alias="CDEK_TEST_MODE")
@@ -45,6 +49,25 @@ class Settings(BaseSettings):
         if self.cdek_test_mode:
             return "https://api.edu.cdek.ru/v2"
         return "https://api.cdek.ru/v2"
+
+    @property
+    def allowed_user_ids(self) -> set[int]:
+        raw = (self.allowed_telegram_ids or "").strip()
+        if not raw:
+            return set()
+        result: set[int] = set()
+        for part in raw.replace(";", ",").split(","):
+            part = part.strip()
+            if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+                result.add(int(part))
+        return result
+
+    def is_user_allowed(self, user_id: int | None) -> bool:
+        allowed = self.allowed_user_ids
+        if not allowed:
+            # пустой список = без ограничений
+            return True
+        return user_id is not None and user_id in allowed
 
 
 @lru_cache

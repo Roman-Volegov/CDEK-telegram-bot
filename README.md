@@ -111,6 +111,27 @@ python scripts/check_imports.py
 
 ---
 
+## Ограничение доступа (whitelist)
+
+В `.env` укажите Telegram ID пользователей через запятую:
+
+```env
+ALLOWED_TELEGRAM_IDS=123456789,987654321
+```
+
+Как узнать ID:
+
+1. Напишите боту `/id` (пока список пустой — бот открыт всем)
+2. Или откройте [@userinfobot](https://t.me/userinfobot)
+
+После изменения `.env`:
+
+```bash
+docker compose up -d --force-recreate bot
+```
+
+Если `ALLOWED_TELEGRAM_IDS` пустой — бот доступен всем.
+
 ## Как пользоваться ботом
 
 | Действие | Команда / кнопка |

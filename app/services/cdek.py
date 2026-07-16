@@ -386,69 +386,89 @@ class CdekClient:
         return data.get("entity") or {}
 
     async def wait_order_ready(
-        self, order_uuid: str, *, attempts: int = 15, delay: float = 2.0
+        self, order_uuid: str, *, attempts: int = 30, delay: float = 1.5
     ) -> dict[str, Any]:
+        """Ждём появления cdek_number — до этого печатные формы часто INVALID."""
         last: dict[str, Any] = {}
         for _ in range(attempts):
             last = await self.get_order(order_uuid)
+            if last.get("cdek_number"):
+                return last
             statuses = last.get("statuses") or []
             codes = {s.get("code") for s in statuses}
-            # ACCEPTED / CREATED — можно печатать
-            if "ACCEPTED" in codes or "CREATED" in codes or last.get("cdek_number"):
-                return last
+            if "INVALID" in codes:
+                errors = []
+                for req in (last.get("requests") or []):
+                    for err in req.get("errors") or []:
+                        errors.append(err.get("message") or str(err))
+                raise RuntimeError(
+                    "Заказ отклонён СДЭК: " + ("; ".join(errors) if errors else str(statuses))
+                )
             await asyncio.sleep(delay)
-        return last
+        raise RuntimeError(
+            "Заказ создан, но номер СДЭК ещё не присвоен. Попробуйте позже выгрузить PDF."
+        )
 
     async def _create_print(
         self, path: str, order_uuid: str, *, format: str = "A4", copy_count: int = 1
     ) -> str:
-        data = await self._request(
-            "POST",
-            path,
-            json={
-                "orders": [{"order_uuid": order_uuid}],
-                "copy_count": copy_count,
-                "format": format,
-            },
-        )
+        body: dict[str, Any] = {
+            "orders": [{"order_uuid": order_uuid}],
+            "copy_count": copy_count,
+            "format": format,
+        }
+        # Для накладной явно указываем российский шаблон
+        if path.rstrip("/").endswith("print/orders"):
+            body["type"] = "tpl_russia"
+        data = await self._request("POST", path, json=body)
         entity = data.get("entity") or {}
         print_uuid = entity.get("uuid")
         if not print_uuid:
             raise RuntimeError(f"Не получен uuid печатной формы: {data}")
         return print_uuid
 
+    async def _fetch_pdf_bytes(self, url: str) -> bytes:
+        if url.startswith("http"):
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                token = await self._ensure_token(client)
+                resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+                resp.raise_for_status()
+                return resp.content
+        return await self._request(
+            "GET", url if url.startswith("/") else f"/{url}", expect_json=False
+        )
+
     async def _download_print_pdf(
-        self, get_path_template: str, print_uuid: str, *, attempts: int = 20, delay: float = 1.5
+        self, get_path_template: str, print_uuid: str, *, attempts: int = 25, delay: float = 1.2
     ) -> bytes:
         path = get_path_template.format(uuid=print_uuid)
         last_error = "timeout"
         for _ in range(attempts):
             try:
-                # статус формы
                 meta = await self._request("GET", path)
                 entity = meta.get("entity") or {}
                 url = entity.get("url")
                 statuses = entity.get("statuses") or []
                 codes = {s.get("code") for s in statuses}
-                if "INVALID" in codes or "REMOVED" in codes:
-                    raise RuntimeError(f"Печатная форма недоступна: {statuses}")
+                # INVALID в entity.statuses — форма битая; requests.state тоже смотрим
+                req_states = {r.get("state") for r in (meta.get("requests") or [])}
+                if "INVALID" in codes or "REMOVED" in codes or "INVALID" in req_states:
+                    errors = []
+                    for req in meta.get("requests") or []:
+                        for err in req.get("errors") or []:
+                            errors.append(err.get("message") or str(err))
+                    raise RuntimeError(
+                        "Печатная форма INVALID: "
+                        + ("; ".join(errors) if errors else str(statuses))
+                    )
                 if url:
-                    # url может быть относительным или абсолютным
-                    if url.startswith("http"):
-                        async with httpx.AsyncClient(timeout=60.0) as client:
-                            token = await self._ensure_token(client)
-                            resp = await client.get(
-                                url, headers={"Authorization": f"Bearer {token}"}
-                            )
-                            resp.raise_for_status()
-                            return resp.content
-                    return await self._request("GET", url if url.startswith("/") else f"/{url}", expect_json=False)
-                # иногда PDF отдаётся сразу по тому же uuid
-                content = await self._request(
-                    "GET", f"{path}.pdf", expect_json=False
-                )
-                if content and content[:4] == b"%PDF":
-                    return content
+                    content = await self._fetch_pdf_bytes(url)
+                    if content and content[:4] == b"%PDF":
+                        return content
+                if "READY" in codes:
+                    content = await self._request("GET", f"{path}.pdf", expect_json=False)
+                    if content and content[:4] == b"%PDF":
+                        return content
             except httpx.HTTPStatusError as exc:
                 last_error = str(exc)
                 if exc.response.status_code not in (404, 202, 204):
@@ -456,16 +476,48 @@ class CdekClient:
             await asyncio.sleep(delay)
         raise RuntimeError(f"Не удалось скачать PDF: {last_error}")
 
+    async def _download_print_with_retry(
+        self,
+        create_path: str,
+        get_path_template: str,
+        order_uuid: str,
+        *,
+        format: str = "A4",
+        retries: int = 4,
+    ) -> bytes:
+        last_exc: Exception | None = None
+        for attempt in range(retries):
+            try:
+                print_uuid = await self._create_print(create_path, order_uuid, format=format)
+                return await self._download_print_pdf(get_path_template, print_uuid)
+            except RuntimeError as exc:
+                last_exc = exc
+                msg = str(exc)
+                if "INVALID" in msg and attempt + 1 < retries:
+                    logger.warning(
+                        "Print INVALID for %s (attempt %s), wait and retry",
+                        order_uuid,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    # убеждаемся, что номер СДЭК уже есть
+                    await self.wait_order_ready(order_uuid, attempts=10, delay=1.0)
+                    continue
+                raise
+        raise RuntimeError(str(last_exc) if last_exc else "Не удалось получить PDF")
+
     async def download_waybill_pdf(self, order_uuid: str, dest: Path) -> Path:
-        print_uuid = await self._create_print("/print/orders", order_uuid, format="A4")
-        pdf = await self._download_print_pdf("/print/orders/{uuid}", print_uuid)
+        pdf = await self._download_print_with_retry(
+            "/print/orders", "/print/orders/{uuid}", order_uuid, format="A4"
+        )
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(pdf)
         return dest
 
     async def download_barcode_pdf(self, order_uuid: str, dest: Path) -> Path:
-        print_uuid = await self._create_print("/print/barcodes", order_uuid, format="A4")
-        pdf = await self._download_print_pdf("/print/barcodes/{uuid}", print_uuid)
+        pdf = await self._download_print_with_retry(
+            "/print/barcodes", "/print/barcodes/{uuid}", order_uuid, format="A4"
+        )
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(pdf)
         return dest

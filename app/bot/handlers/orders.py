@@ -475,6 +475,8 @@ async def order_create(
         await state.clear()
     except Exception as exc:
         logger.exception("order create failed")
+        # Если заказ в СДЭК уже есть, не помечаем как полный провал — PDF можно добрать
+        order_exists = bool(created_uuid)
         if our_number:
             try:
                 async with session_factory() as session:
@@ -483,12 +485,31 @@ async def order_create(
                     )
                     db_order = result.scalar_one_or_none()
                     if db_order:
-                        db_order.status = "failed"
                         db_order.cdek_uuid = created_uuid
                         db_order.error_message = str(exc)
+                        if order_exists:
+                            # подтянем трек, если уже есть
+                            try:
+                                entity = await cdek.get_order(created_uuid)
+                                db_order.cdek_number = (
+                                    str(entity.get("cdek_number") or "") or None
+                                )
+                            except Exception:
+                                pass
+                            db_order.status = "created_no_pdf"
+                        else:
+                            db_order.status = "failed"
                         await session.commit()
             except Exception:
                 logger.exception("failed to persist error order")
 
-        await callback.message.edit_text(f"❌ Не удалось создать заказ: {exc}")
+        if order_exists and our_number:
+            await callback.message.edit_text(
+                f"⚠️ Заказ <b>{our_number}</b> создан в СДЭК, но PDF не готовы:\n"
+                f"<code>{exc}</code>\n\n"
+                f"Отправьте номер <code>{our_number}</code> чуть позже, "
+                "чтобы скачать накладную и штрихкоды."
+            )
+        else:
+            await callback.message.edit_text(f"❌ Не удалось создать заказ: {exc}")
         await state.clear()

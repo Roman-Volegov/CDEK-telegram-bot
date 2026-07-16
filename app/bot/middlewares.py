@@ -25,15 +25,18 @@ class AccessControlMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         user_id = user.id if user else None
+        username = user.username if user else None
 
-        if self.settings.is_user_allowed(user_id):
+        if self.settings.is_user_allowed(user_id, username):
             return await handler(event, data)
 
         # Сообщаем ID — чтобы его можно было добавить в whitelist
+        uname = f"@{username}" if username else "—"
         text = (
             "⛔ Бот доступен только авторизованным пользователям.\n"
             f"Ваш Telegram ID: <code>{user_id}</code>\n"
-            "Передайте его администратору."
+            f"Username: {uname}\n"
+            "Передайте это администратору."
         )
         if isinstance(event, Update):
             if event.message:

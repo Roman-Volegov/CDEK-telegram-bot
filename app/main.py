@@ -49,9 +49,14 @@ async def main() -> None:
     dp.update.middleware(ServicesMiddleware(settings, cdek, dadata, session_factory))
     dp.include_router(setup_routers())
 
-    allowed = settings.allowed_user_ids
-    if allowed:
-        logger.info("Access whitelist enabled: %s user(s)", len(allowed))
+    allowed_ids = settings.allowed_user_ids
+    allowed_names = settings.allowed_usernames
+    if allowed_ids or allowed_names:
+        logger.info(
+            "Access whitelist: %s id(s), %s username(s)",
+            len(allowed_ids),
+            len(allowed_names),
+        )
     else:
         logger.warning("ALLOWED_TELEGRAM_IDS пуст — бот доступен всем")
 

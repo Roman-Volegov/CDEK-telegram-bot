@@ -51,24 +51,42 @@ class Settings(BaseSettings):
             return "https://api.edu.cdek.ru/v2"
         return "https://api.cdek.ru/v2"
 
-    @property
-    def allowed_user_ids(self) -> set[int]:
+    def _allowed_parts(self) -> list[str]:
         raw = (self.allowed_telegram_ids or "").strip()
         if not raw:
-            return set()
+            return []
+        return [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+
+    @property
+    def allowed_user_ids(self) -> set[int]:
         result: set[int] = set()
-        for part in raw.replace(";", ",").split(","):
-            part = part.strip()
+        for part in self._allowed_parts():
             if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
                 result.add(int(part))
         return result
 
-    def is_user_allowed(self, user_id: int | None) -> bool:
-        allowed = self.allowed_user_ids
-        if not allowed:
+    @property
+    def allowed_usernames(self) -> set[str]:
+        result: set[str] = set()
+        for part in self._allowed_parts():
+            if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+                continue
+            name = part[1:] if part.startswith("@") else part
+            if name:
+                result.add(name.casefold())
+        return result
+
+    def is_user_allowed(self, user_id: int | None, username: str | None = None) -> bool:
+        ids = self.allowed_user_ids
+        names = self.allowed_usernames
+        if not ids and not names:
             # пустой список = без ограничений
             return True
-        return user_id is not None and user_id in allowed
+        if user_id is not None and user_id in ids:
+            return True
+        if username and username.casefold() in names:
+            return True
+        return False
 
 
 @lru_cache

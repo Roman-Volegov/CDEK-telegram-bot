@@ -21,10 +21,10 @@ class Settings(BaseSettings):
     dadata_api_key: str = Field(alias="DADATA_API_KEY")
     dadata_secret_key: str = Field(alias="DADATA_SECRET_KEY")
 
-    default_weight_g: int = Field(default=1000, alias="DEFAULT_WEIGHT_G")
-    default_length_cm: int = Field(default=30, alias="DEFAULT_LENGTH_CM")
-    default_width_cm: int = Field(default=20, alias="DEFAULT_WIDTH_CM")
-    default_height_cm: int = Field(default=10, alias="DEFAULT_HEIGHT_CM")
+    default_weight_g: int = Field(default=100, alias="DEFAULT_WEIGHT_G")
+    default_length_cm: int = Field(default=10, alias="DEFAULT_LENGTH_CM")
+    default_width_cm: int = Field(default=10, alias="DEFAULT_WIDTH_CM")
+    default_height_cm: int = Field(default=5, alias="DEFAULT_HEIGHT_CM")
 
     default_item_name: str = Field(default="Товар", alias="DEFAULT_ITEM_NAME")
     default_item_ware_key: str = Field(default="ITEM-1", alias="DEFAULT_ITEM_WARE_KEY")

@@ -492,15 +492,23 @@ class CdekClient:
         width = width if width is not None else s.default_width_cm
         height = height if height is not None else s.default_height_cm
 
+        sender = {
+            "name": s.cdek_sender_name,
+            "phones": [{"number": s.cdek_sender_phone}],
+        }
+        # seller = истинный продавец; принудительно тот же, что и отправитель
+        seller = {
+            "name": s.cdek_sender_name,
+            "phone": s.cdek_sender_phone,
+        }
+
         payload: dict[str, Any] = {
             "type": s.cdek_order_type,
             "number": our_number,
             "tariff_code": tariff_code,
             "shipment_point": s.cdek_shipment_point,
-            "sender": {
-                "name": s.cdek_sender_name,
-                "phones": [{"number": s.cdek_sender_phone}],
-            },
+            "sender": sender,
+            "seller": seller,
             "recipient": {
                 "name": recipient_name,
                 "phones": [{"number": recipient_phone}],

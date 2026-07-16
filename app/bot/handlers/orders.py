@@ -374,7 +374,7 @@ async def order_item_cost(message: Message, state: FSMContext, settings: Setting
         f"Место: {settings.default_weight_g} г, "
         f"{settings.default_length_cm}×{settings.default_width_cm}×{settings.default_height_cm}\n"
         f"Отправитель: {settings.cdek_sender_name}, {settings.cdek_sender_phone}\n"
-        f"Тип: доставка (type={settings.cdek_order_type})\n"
+        f"Тип: интернет-магазин (type={settings.cdek_order_type})\n"
         f"Отгрузка: ПВЗ {settings.cdek_shipment_point}\n"
         f"Номер будет вида <code>2026-000001</code>"
     )

@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     cdek_client_secret: str = Field(alias="CDEK_CLIENT_SECRET")
     cdek_test_mode: bool = Field(default=True, alias="CDEK_TEST_MODE")
     cdek_shipment_point: str = Field(alias="CDEK_SHIPMENT_POINT")
-    # 1 — интернет-магазин, 2 — доставка (от физлица)
-    cdek_order_type: int = Field(default=2, alias="CDEK_ORDER_TYPE")
+    # 1 — интернет-магазин, 2 — доставка
+    cdek_order_type: int = Field(default=1, alias="CDEK_ORDER_TYPE")
 
     cdek_sender_name: str = Field(
         default="Волегов Роман Андреевич", alias="CDEK_SENDER_NAME"

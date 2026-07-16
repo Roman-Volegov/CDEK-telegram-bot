@@ -99,7 +99,7 @@ async def order_address_ok(
     region = data.get("region")
     await callback.message.edit_text("Считаю тарифы…")
     try:
-        cities = await cdek.find_city(city_name.replace("г ", "").replace("г. ", ""), region)
+        cities = await cdek.find_city(city_name, region)
         if not cities:
             cities = await cdek.find_city(city_name)
         if not cities:

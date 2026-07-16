@@ -46,21 +46,30 @@ async def calc_address(
     try:
         clean = await dadata.clean_address(raw)
         city_name = clean.city_name
+        logger.info(
+            "DaData address: city=%r settlement=%r region=%r -> city_name=%r | %s",
+            clean.city,
+            clean.settlement,
+            clean.region,
+            city_name,
+            clean.display,
+        )
         if not city_name:
             await wait.edit_text(
-                "Не удалось определить город. Уточните адрес.\n"
+                "Не удалось определить город. Уточните адрес "
+                "(укажите город явно, например: <code>Санкт-Петербург, …</code>).\n"
                 f"Распознано: <code>{clean.display}</code>"
             )
             return
 
-        cities = await cdek.find_city(city_name.replace("г ", "").replace("г. ", ""), clean.region)
+        cities = await cdek.find_city(city_name, clean.region)
         if not cities:
-            # повтор без региона
             cities = await cdek.find_city(city_name)
         if not cities:
             await wait.edit_text(
                 f"Город «{city_name}» не найден в справочнике СДЭК.\n"
-                f"Адрес: <code>{clean.display}</code>"
+                f"Адрес: <code>{clean.display}</code>\n"
+                "Попробуйте указать город иначе или /calc заново."
             )
             return
 

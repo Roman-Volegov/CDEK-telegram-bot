@@ -37,39 +37,48 @@ def _local_status_label(order: Order) -> str:
     return mapping.get(order.status, order.status)
 
 
-def _order_total_cost(order: Order) -> float:
-    """Полная стоимость: товар + доставка."""
-    item = float(order.item_cost or 0)
-    delivery = float(order.delivery_sum or 0)
-    return item + delivery
+def _format_cost(total_sum: float | None, *, in_cdek: bool) -> str:
+    if total_sum is None:
+        return "ожидается из СДЭК" if in_cdek else "—"
+    return f"{total_sum:.0f} ₽"
 
 
-def _format_order_line(idx: int, order: Order, status_label: str) -> str:
+def _format_order_line(
+    idx: int,
+    order: Order,
+    status_label: str,
+    *,
+    cdek_total_sum: float | None = None,
+) -> str:
     cdek_number = order.cdek_number or "—"
-    total = _order_total_cost(order)
+    in_cdek = bool(order.cdek_uuid)
     return (
         f"<b>{idx}. {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
         f"Адрес: {order.to_address}\n"
         f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
-        f"Стоимость: {total:.0f} ₽\n"
+        f"Стоимость: {_format_cost(cdek_total_sum, in_cdek=in_cdek)}\n"
         f"Номер СДЭК: <code>{cdek_number}</code>"
     )
 
 
-def _format_order_detail(order: Order, status_label: str) -> str:
+def _format_order_detail(
+    order: Order,
+    status_label: str,
+    *,
+    cdek_total_sum: float | None = None,
+) -> str:
     cdek_number = order.cdek_number or "—"
-    total = _order_total_cost(order)
-    delivery = float(order.delivery_sum or 0)
     item = float(order.item_cost or 0)
+    in_cdek = bool(order.cdek_uuid)
     return (
         f"<b>Заказ {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
         f"Адрес: {order.to_address}\n"
         f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
         f"Тариф: {order.tariff_name or order.tariff_code}\n"
-        f"Товар: {item:.0f} ₽ · Доставка: {delivery:.0f} ₽\n"
-        f"Полная стоимость: {total:.0f} ₽\n"
+        f"Стоимость товара: {item:.0f} ₽\n"
+        f"Стоимость заказа (СДЭК): {_format_cost(cdek_total_sum, in_cdek=in_cdek)}\n"
         f"Номер СДЭК: <code>{cdek_number}</code>"
     )
 
@@ -96,31 +105,45 @@ async def _get_cdek_client(
     return CdekClient(cfg)
 
 
-async def _resolve_status(
+async def _resolve_live_info(
     order: Order,
     cdek: CdekClient | None,
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> str:
+) -> tuple[str, float | None]:
+    """Возвращает (статус, стоимость из СДЭК)."""
     if order.status == "cancelled":
-        return _local_status_label(order)
+        return _local_status_label(order), None
     if not order.cdek_uuid or cdek is None:
-        return _local_status_label(order)
+        return _local_status_label(order), None
     try:
         entity = await cdek.get_order(order.cdek_uuid)
         label = CdekClient.latest_status_label(entity)
         cdek_number = str(entity.get("cdek_number") or "") or None
-        if session_factory is not None and cdek_number and cdek_number != order.cdek_number:
+        total_sum = CdekClient.order_total_sum(entity)
+        if session_factory is not None and (
+            (cdek_number and cdek_number != order.cdek_number)
+            or (total_sum is not None and total_sum != order.delivery_sum)
+        ):
             async with session_factory() as session:
                 db_order = await session.get(Order, order.id)
                 if db_order:
-                    db_order.cdek_number = cdek_number
+                    if cdek_number:
+                        db_order.cdek_number = cdek_number
+                    if total_sum is not None:
+                        db_order.delivery_sum = total_sum
                     await session.commit()
-            order.cdek_number = cdek_number
-        return label or _local_status_label(order)
+            if cdek_number:
+                order.cdek_number = cdek_number
+            if total_sum is not None:
+                order.delivery_sum = total_sum
+        return label or _local_status_label(order), total_sum
     except Exception:
         logger.exception("failed to fetch CDEK status for %s", order.our_number)
-        return f"{_local_status_label(order)} (не удалось обновить из СДЭК)"
+        return (
+            f"{_local_status_label(order)} (не удалось обновить из СДЭК)",
+            None,
+        )
 
 
 async def _ensure_pdf_files(
@@ -277,8 +300,12 @@ async def _build_page_text(
         "",
     ]
     for idx, order in enumerate(orders, start=1):
-        status = await _resolve_status(order, cdek, session_factory=session_factory)
-        lines.append(_format_order_line(idx, order, status))
+        status, total_sum = await _resolve_live_info(
+            order, cdek, session_factory=session_factory
+        )
+        lines.append(
+            _format_order_line(idx, order, status, cdek_total_sum=total_sum)
+        )
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -412,9 +439,11 @@ async def history_view_order(
         await callback.answer("Заказ не найден", show_alert=True)
         return
     cdek = await _get_cdek_client(session_factory, profiles, callback.from_user.id)
-    status = await _resolve_status(order, cdek, session_factory=session_factory)
+    status, total_sum = await _resolve_live_info(
+        order, cdek, session_factory=session_factory
+    )
     await callback.message.edit_text(
-        _format_order_detail(order, status),
+        _format_order_detail(order, status, cdek_total_sum=total_sum),
         reply_markup=history_order_kb(
             order.id,
             editable=order_is_local_editable(order),
@@ -510,7 +539,7 @@ async def history_cancel_order(
     order = await _get_user_order(session_factory, order_id, callback.from_user.id)
     assert order is not None
     await callback.message.edit_text(
-        _format_order_detail(order, _local_status_label(order)),
+        _format_order_detail(order, _local_status_label(order), cdek_total_sum=None),
         reply_markup=history_order_kb(
             order.id,
             editable=order_is_local_editable(order),

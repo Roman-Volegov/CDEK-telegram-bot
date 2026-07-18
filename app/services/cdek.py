@@ -438,6 +438,40 @@ class CdekClient:
             return f"{name} ({code})"
         return name or code or None
 
+    @staticmethod
+    def order_total_sum(entity: dict[str, Any] | None) -> float | None:
+        """
+        Итоговая стоимость заказа из ответа СДЭК.
+        Приоритет: delivery_detail.total_sum → delivery_detail.delivery_sum → услуги.
+        """
+        if not entity:
+            return None
+        detail = entity.get("delivery_detail") or {}
+        for key in ("total_sum", "delivery_sum"):
+            raw = detail.get(key)
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+
+        services = entity.get("services") or []
+        service_total = 0.0
+        found = False
+        for svc in services:
+            raw = svc.get("total_sum")
+            if raw is None:
+                raw = svc.get("sum")
+            if raw is None:
+                continue
+            try:
+                service_total += float(raw)
+                found = True
+            except (TypeError, ValueError):
+                continue
+        return service_total if found else None
+
     async def get_order_status_label(self, order_uuid: str) -> str | None:
         entity = await self.get_order(order_uuid)
         return self.latest_status_label(entity)

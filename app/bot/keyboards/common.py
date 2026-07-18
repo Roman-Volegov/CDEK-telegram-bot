@@ -196,9 +196,9 @@ def history_order_kb(
             InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hist:edit:{order_id}"),
             InlineKeyboardButton(text="🚫 Отменить", callback_data=f"hist:cancel:{order_id}"),
         )
-        builder.row(
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"hist:delete:{order_id}"),
-        )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удалить из базы", callback_data=f"hist:delete:{order_id}:{page}"),
+    )
     if has_pdfs or can_fetch_pdf:
         label = "📄 PDF" if has_pdfs else "📄 Выгрузить PDF"
         builder.row(
@@ -206,5 +206,20 @@ def history_order_kb(
         )
     builder.row(
         InlineKeyboardButton(text="⬅️ К списку", callback_data=f"hist:page:{page}"),
+    )
+    return builder.as_markup()
+
+
+def history_delete_confirm_kb(order_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, удалить",
+            callback_data=f"hist:delete_yes:{order_id}:{page}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Нет",
+            callback_data=f"hist:view:{order_id}:{page}",
+        ),
     )
     return builder.as_markup()

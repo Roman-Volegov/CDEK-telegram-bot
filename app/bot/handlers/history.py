@@ -12,7 +12,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers.orders import load_saved_order_for_edit, order_is_local_editable
-from app.bot.keyboards.common import history_order_kb, history_page_kb, main_menu
+from app.bot.keyboards.common import (
+    history_delete_confirm_kb,
+    history_order_kb,
+    history_page_kb,
+    main_menu,
+)
 from app.config import Settings
 from app.db.models import Order
 from app.services.cdek import CdekClient
@@ -551,13 +556,58 @@ async def history_cancel_order(
     await callback.answer("Заказ отменён")
 
 
+def _parse_order_page_callback(data: str | None, *, prefix_parts: int) -> tuple[int | None, int]:
+    """hist:delete:{id}:{page} / hist:delete_yes:{id}:{page}"""
+    parts = (data or "").split(":")
+    if len(parts) < prefix_parts + 1 or not parts[prefix_parts].isdigit():
+        return None, 0
+    order_id = int(parts[prefix_parts])
+    page = (
+        int(parts[prefix_parts + 1])
+        if len(parts) > prefix_parts + 1 and parts[prefix_parts + 1].isdigit()
+        else 0
+    )
+    return order_id, page
+
+
 @router.callback_query(F.data.startswith("hist:delete:"))
-async def history_delete_order(
+async def history_delete_ask(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    order_id, page = _parse_order_page_callback(callback.data, prefix_parts=2)
+    if order_id is None:
+        await callback.answer("Некорректный заказ", show_alert=True)
+        return
+    order = await _get_user_order(session_factory, order_id, callback.from_user.id)
+    if not order:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    cdek = order.cdek_number or "—"
+    note = ""
+    if order.cdek_uuid:
+        note = (
+            "\n\nЗаказ уже есть в СДЭК — удалится только запись в боте, "
+            "не сам заказ в личном кабинете СДЭК."
+        )
+    await callback.message.edit_text(
+        f"Удалить заказ <b>{order.our_number}</b> из базы бота?\n"
+        f"Номер СДЭК: <code>{cdek}</code>{note}",
+        reply_markup=history_delete_confirm_kb(order.id, page=page),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hist:delete_yes:"))
+async def history_delete_confirm(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     profiles: ProfileService,
 ) -> None:
-    order_id = int((callback.data or "").split(":")[-1])
+    order_id, page = _parse_order_page_callback(callback.data, prefix_parts=2)
+    if order_id is None:
+        await callback.answer("Некорректный заказ", show_alert=True)
+        return
     async with session_factory() as session:
         result = await session.execute(
             select(Order).where(
@@ -569,14 +619,9 @@ async def history_delete_order(
         if not order:
             await callback.answer("Заказ не найден", show_alert=True)
             return
-        if not order_is_local_editable(order):
-            await callback.answer(
-                "Этот заказ уже в работе и не может быть удалён",
-                show_alert=True,
-            )
-            return
         waybill_path = order.waybill_path
         barcode_path = order.barcode_path
+        our_number = order.our_number
         await session.execute(delete(Order).where(Order.id == order.id))
         await session.commit()
     for path in (waybill_path, barcode_path):
@@ -585,10 +630,10 @@ async def history_delete_order(
                 Path(path).unlink()
             except OSError:
                 pass
-    await callback.answer("Заказ удалён")
+    await callback.answer(f"Удалён {our_number}")
     await _render_orders_page(
         callback,
-        page=0,
+        page=page,
         session_factory=session_factory,
         profiles=profiles,
         answer_callback=False,

@@ -1,6 +1,10 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class PaymentStates(StatesGroup):
+    confirm = State()
+
+
 class SetupStates(StatesGroup):
     cdek_client_id = State()
     cdek_client_secret = State()

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.bot.handlers import router
 from app.bot.middlewares import AccessControlMiddleware, ServicesMiddleware
 from app.config import get_settings
-from app.db.models import Base
+from app.db.schema import init_schema
 from app.services.access import AccessService
 from app.services.crypto import SecretBox
 from app.services.profile import ProfileService
@@ -27,15 +27,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def init_db(engine) -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-
 async def main() -> None:
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-    await init_db(engine)
+    await init_schema(engine)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     secret_box = SecretBox(settings.encryption_key)

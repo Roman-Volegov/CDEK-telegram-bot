@@ -8,11 +8,20 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📦 Рассчитать"), KeyboardButton(text="🚚 Создать заказ")],
-            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="⚙️ Настройки")],
-            [KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="💳 Оплатить за СДЭК")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
     )
+
+
+def payment_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data="payment:confirm"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="payment:cancel"),
+    )
+    return builder.as_markup()
 
 
 def request_access_kb() -> ReplyKeyboardMarkup:

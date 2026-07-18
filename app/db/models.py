@@ -42,7 +42,24 @@ class Order(Base):
     waybill_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     barcode_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # Оплата за СДЭК: NULL = ещё не включён в подтверждённую оплату
+    payment_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CdekPayment(Base):
+    """Подтверждённая оплата за заказы СДЭК (расчёт внутри бота)."""
+
+    __tablename__ = "cdek_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    total_sum: Mapped[float] = mapped_column(Float, nullable=False)
+    orders_count: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

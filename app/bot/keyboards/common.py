@@ -179,6 +179,27 @@ def history_page_kb(
         )
     if nav:
         builder.row(*nav)
+    builder.row(
+        InlineKeyboardButton(
+            text="🗑 Удалить без статуса СДЭК",
+            callback_data="hist:purge_nostatus",
+        )
+    )
+    return builder.as_markup()
+
+
+def history_purge_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, удалить все",
+            callback_data="hist:purge_nostatus_yes",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="hist:page:0",
+        ),
+    )
     return builder.as_markup()
 
 

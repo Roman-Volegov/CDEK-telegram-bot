@@ -16,8 +16,10 @@ from app.bot.keyboards.common import (
     history_delete_confirm_kb,
     history_order_kb,
     history_page_kb,
+    history_purge_confirm_kb,
     main_menu,
 )
+from app.bot.states import HistoryStates
 from app.config import Settings
 from app.db.models import Order
 from app.services.cdek import CdekClient
@@ -376,9 +378,11 @@ async def my_orders(
 @router.callback_query(F.data.startswith("hist:page:"))
 async def history_page(
     callback: CallbackQuery,
+    state: FSMContext,
     session_factory: async_sessionmaker[AsyncSession],
     profiles: ProfileService,
 ) -> None:
+    await state.clear()
     raw = (callback.data or "").split(":")[-1]
     page = int(raw) if raw.isdigit() else 0
     await _render_orders_page(
@@ -386,6 +390,168 @@ async def history_page(
         page=page,
         session_factory=session_factory,
         profiles=profiles,
+    )
+
+
+async def _load_orders_with_cdek_uuid(
+    session_factory: async_sessionmaker[AsyncSession],
+    telegram_user_id: int,
+) -> list[Order]:
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Order)
+            .where(
+                Order.telegram_user_id == telegram_user_id,
+                Order.cdek_uuid.is_not(None),
+            )
+            .order_by(Order.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def _find_orders_without_cdek_status(
+    orders: list[Order],
+    cdek: CdekClient,
+) -> list[Order]:
+    failed: list[Order] = []
+    for order in orders:
+        if not order.cdek_uuid:
+            continue
+        try:
+            await cdek.get_order(order.cdek_uuid)
+        except Exception:
+            logger.info(
+                "no CDEK status for order %s uuid=%s",
+                order.our_number,
+                order.cdek_uuid,
+            )
+            failed.append(order)
+    return failed
+
+
+@router.callback_query(F.data == "hist:purge_nostatus")
+async def history_purge_nostatus_ask(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+) -> None:
+    await callback.answer()
+    if callback.message is None or callback.from_user is None:
+        return
+    cdek = await _get_cdek_client(session_factory, profiles, callback.from_user.id)
+    if cdek is None:
+        await callback.message.answer(
+            "Чтобы проверить статусы в СДЭК, сначала пройдите /setup.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await callback.message.edit_text("⏳ Проверяю статусы заказов в СДЭК…")
+    orders = await _load_orders_with_cdek_uuid(session_factory, callback.from_user.id)
+    if not orders:
+        await callback.message.edit_text(
+            "Нет заказов с UUID СДЭК для проверки.",
+        )
+        await _render_orders_page(
+            callback,
+            page=0,
+            session_factory=session_factory,
+            profiles=profiles,
+            answer_callback=False,
+        )
+        return
+
+    failed = await _find_orders_without_cdek_status(orders, cdek)
+    if not failed:
+        await callback.message.edit_text(
+            "У всех заказов со связью СДЭК статус успешно получен.",
+        )
+        await _render_orders_page(
+            callback,
+            page=0,
+            session_factory=session_factory,
+            profiles=profiles,
+            answer_callback=False,
+        )
+        return
+
+    await state.set_state(HistoryStates.purge_confirm)
+    await state.update_data(purge_order_ids=[o.id for o in failed])
+    lines = [
+        f"<b>Удалить из базы {len(failed)} заказ(ов)</b>, "
+        "по которым не удалось получить статус из СДЭК?",
+        "",
+    ]
+    for order in failed[:30]:
+        cdek_no = order.cdek_number or "—"
+        lines.append(f"• {order.our_number} · СДЭК <code>{cdek_no}</code>")
+    if len(failed) > 30:
+        lines.append(f"… и ещё {len(failed) - 30}")
+    lines.append("")
+    lines.append("Заказы в личном кабинете СДЭК не изменяются.")
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=history_purge_confirm_kb(),
+    )
+
+
+@router.callback_query(HistoryStates.purge_confirm, F.data == "hist:purge_nostatus_yes")
+async def history_purge_nostatus_confirm(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+) -> None:
+    data = await state.get_data()
+    order_ids = [int(x) for x in (data.get("purge_order_ids") or [])]
+    await state.clear()
+    if not order_ids or callback.from_user is None:
+        await callback.answer("Нечего удалять", show_alert=True)
+        return
+
+    pdf_paths: list[str] = []
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Order).where(
+                Order.id.in_(order_ids),
+                Order.telegram_user_id == callback.from_user.id,
+            )
+        )
+        to_delete = list(result.scalars().all())
+        for order in to_delete:
+            if order.waybill_path:
+                pdf_paths.append(order.waybill_path)
+            if order.barcode_path:
+                pdf_paths.append(order.barcode_path)
+        if to_delete:
+            await session.execute(
+                delete(Order).where(
+                    Order.id.in_([o.id for o in to_delete]),
+                    Order.telegram_user_id == callback.from_user.id,
+                )
+            )
+            await session.commit()
+        deleted = len(to_delete)
+
+    for path in pdf_paths:
+        if path and Path(path).exists():
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+
+    await callback.answer(f"Удалено: {deleted}")
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Из базы удалено заказов без статуса СДЭК: <b>{deleted}</b>"
+        )
+    await _render_orders_page(
+        callback,
+        page=0,
+        session_factory=session_factory,
+        profiles=profiles,
+        answer_callback=False,
     )
 
 

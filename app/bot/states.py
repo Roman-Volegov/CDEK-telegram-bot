@@ -5,6 +5,10 @@ class PaymentStates(StatesGroup):
     confirm = State()
 
 
+class HistoryStates(StatesGroup):
+    purge_confirm = State()
+
+
 class SetupStates(StatesGroup):
     cdek_client_id = State()
     cdek_client_secret = State()

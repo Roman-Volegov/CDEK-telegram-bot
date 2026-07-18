@@ -179,6 +179,7 @@ def history_order_kb(
     editable: bool,
     has_pdfs: bool,
     page: int = 0,
+    can_fetch_pdf: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if editable:
@@ -189,9 +190,10 @@ def history_order_kb(
         builder.row(
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"hist:delete:{order_id}"),
         )
-    if has_pdfs:
+    if has_pdfs or can_fetch_pdf:
+        label = "📄 PDF" if has_pdfs else "📄 Выгрузить PDF"
         builder.row(
-            InlineKeyboardButton(text="📄 PDF", callback_data=f"hist:pdf:{order_id}"),
+            InlineKeyboardButton(text=label, callback_data=f"hist:pdf:{order_id}"),
         )
     builder.row(
         InlineKeyboardButton(text="⬅️ К списку", callback_data=f"hist:page:{page}"),

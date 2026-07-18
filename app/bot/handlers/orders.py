@@ -1177,7 +1177,9 @@ async def order_create(
             await callback.message.edit_text(
                 f"⚠️ Заказ <b>{our_number}</b> создан в СДЭК, но PDF не готовы:\n"
                 f"<code>{exc}</code>\n\n"
-                f"Отправьте номер <code>{our_number}</code> позже для PDF."
+                f"Позже отправьте номер <code>{our_number}</code> "
+                f"или команду <code>/pdf {our_number}</code> — "
+                f"бот докачает PDF из СДЭК."
             )
         else:
             await callback.message.edit_text(f"❌ Не удалось создать заказ: {exc}")

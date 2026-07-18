@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy import delete, func, select
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers.orders import load_saved_order_for_edit, order_is_local_editable
 from app.bot.keyboards.common import history_order_kb, history_page_kb, main_menu
+from app.config import Settings
 from app.db.models import Order
 from app.services.cdek import CdekClient
 from app.services.profile import ProfileService, load_runtime_for_user
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 router = Router(name="history")
 
 PAGE_SIZE = 3
+OUR_NUMBER_RE = re.compile(r"^\d{4}-\d{6}$")
 
 
 def _local_status_label(order: Order) -> str:
@@ -65,6 +68,10 @@ def _has_pdfs(order: Order) -> bool:
     )
 
 
+def _can_fetch_pdf(order: Order) -> bool:
+    return bool(order.cdek_uuid) and order.status != "cancelled"
+
+
 async def _get_cdek_client(
     session_factory: async_sessionmaker[AsyncSession],
     profiles: ProfileService,
@@ -101,6 +108,115 @@ async def _resolve_status(
     except Exception:
         logger.exception("failed to fetch CDEK status for %s", order.our_number)
         return f"{_local_status_label(order)} (не удалось обновить из СДЭК)"
+
+
+async def _ensure_pdf_files(
+    order: Order,
+    *,
+    cdek: CdekClient | None,
+    session_factory: async_sessionmaker[AsyncSession],
+    pdf_storage_path: str,
+) -> tuple[Path | None, Path | None, str | None]:
+    """
+    Возвращает локальные PDF; при отсутствии докачивает из СДЭК по cdek_uuid.
+    (waybill, barcode, error)
+    """
+    waybill = Path(order.waybill_path) if order.waybill_path else None
+    barcode = Path(order.barcode_path) if order.barcode_path else None
+    local_waybill = waybill if waybill and waybill.exists() else None
+    local_barcode = barcode if barcode and barcode.exists() else None
+    if local_waybill or local_barcode:
+        return local_waybill, local_barcode, None
+
+    if not order.cdek_uuid:
+        return None, None, "PDF нет: заказ ещё не создан в СДЭК."
+    if cdek is None:
+        return None, None, "Чтобы выгрузить PDF из СДЭК, пройдите /setup."
+
+    pdf_dir = Path(pdf_storage_path)
+    waybill_path = pdf_dir / f"nakladnaya_{order.our_number}.pdf"
+    barcode_path = pdf_dir / f"shtrihkody_{order.our_number}.pdf"
+    try:
+        entity = await cdek.wait_order_ready(order.cdek_uuid, attempts=20, delay=1.2)
+        cdek_number = str(entity.get("cdek_number") or "") or None
+        await cdek.download_waybill_pdf(order.cdek_uuid, waybill_path)
+        await cdek.download_barcode_pdf(order.cdek_uuid, barcode_path)
+    except Exception as exc:
+        logger.exception("PDF fetch failed for %s", order.our_number)
+        return None, None, f"Не удалось выгрузить PDF: {exc}"
+
+    async with session_factory() as session:
+        db_order = await session.get(Order, order.id)
+        if db_order:
+            db_order.waybill_path = str(waybill_path)
+            db_order.barcode_path = str(barcode_path)
+            if cdek_number:
+                db_order.cdek_number = cdek_number
+            if db_order.status in {"created_no_pdf", "pending", "created"}:
+                db_order.status = "completed"
+            await session.commit()
+
+    order.waybill_path = str(waybill_path)
+    order.barcode_path = str(barcode_path)
+    if cdek_number:
+        order.cdek_number = cdek_number
+    if order.status in {"created_no_pdf", "pending", "created"}:
+        order.status = "completed"
+    return waybill_path, barcode_path, None
+
+
+async def _send_order_pdfs(
+    message: Message,
+    order: Order,
+    *,
+    cdek: CdekClient | None,
+    session_factory: async_sessionmaker[AsyncSession],
+    pdf_storage_path: str,
+    with_menu: bool = True,
+) -> bool:
+    """Отправляет PDF (локальные или из СДЭК). True если хоть один файл ушёл."""
+    wait: Message | None = None
+    if not _has_pdfs(order) and order.cdek_uuid:
+        wait = await message.answer("⏳ Выгружаю PDF из СДЭК…")
+
+    waybill, barcode, error = await _ensure_pdf_files(
+        order,
+        cdek=cdek,
+        session_factory=session_factory,
+        pdf_storage_path=pdf_storage_path,
+    )
+    if error:
+        if wait:
+            await wait.edit_text(error)
+            if with_menu:
+                await message.answer("Главное меню:", reply_markup=main_menu())
+        else:
+            await message.answer(error, reply_markup=main_menu() if with_menu else None)
+        return False
+
+    sent = False
+    if waybill:
+        await message.answer_document(
+            FSInputFile(waybill, filename=waybill.name),
+            caption=f"Накладная {order.our_number}",
+        )
+        sent = True
+    if barcode:
+        await message.answer_document(
+            FSInputFile(barcode, filename=barcode.name),
+            caption=f"Штрихкоды {order.our_number}",
+            reply_markup=main_menu() if with_menu else None,
+        )
+        sent = True
+    elif sent and with_menu:
+        await message.answer("Готово.", reply_markup=main_menu())
+
+    if wait:
+        if sent:
+            await wait.edit_text(f"✅ PDF для <b>{order.our_number}</b> готовы.")
+        else:
+            await wait.edit_text("PDF для этого заказа ещё нет.")
+    return sent
 
 
 async def _load_page(
@@ -243,6 +359,21 @@ async def _get_user_order(
         return result.scalar_one_or_none()
 
 
+async def _get_user_order_by_number(
+    session_factory: async_sessionmaker[AsyncSession],
+    number: str,
+    telegram_user_id: int,
+) -> Order | None:
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Order).where(
+                Order.our_number == number,
+                Order.telegram_user_id == telegram_user_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+
 def _parse_view_callback(data: str | None) -> tuple[int | None, int]:
     parts = (data or "").split(":")
     # hist:view:{order_id}[:page]
@@ -275,6 +406,7 @@ async def history_view_order(
             order.id,
             editable=order_is_local_editable(order),
             has_pdfs=_has_pdfs(order),
+            can_fetch_pdf=_can_fetch_pdf(order),
             page=page,
         ),
     )
@@ -285,23 +417,27 @@ async def history_view_order(
 async def history_send_pdf(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+    settings: Settings,
 ) -> None:
     order_id = int((callback.data or "").split(":")[-1])
     order = await _get_user_order(session_factory, order_id, callback.from_user.id)
     if not order:
         await callback.answer("Заказ не найден", show_alert=True)
         return
-    sent = False
-    if order.waybill_path and Path(order.waybill_path).exists():
-        await callback.message.answer_document(FSInputFile(order.waybill_path))
-        sent = True
-    if order.barcode_path and Path(order.barcode_path).exists():
-        await callback.message.answer_document(FSInputFile(order.barcode_path))
-        sent = True
-    if not sent:
-        await callback.answer("PDF для этого заказа ещё нет", show_alert=True)
-        return
-    await callback.answer("PDF отправлены")
+    await callback.answer()
+    cdek = await _get_cdek_client(session_factory, profiles, callback.from_user.id)
+    assert callback.message is not None
+    sent = await _send_order_pdfs(
+        callback.message,
+        order,
+        cdek=cdek,
+        session_factory=session_factory,
+        pdf_storage_path=settings.pdf_storage_path,
+        with_menu=True,
+    )
+    if not sent and not order.cdek_uuid:
+        await callback.message.answer("PDF для этого заказа ещё нет.", reply_markup=main_menu())
 
 
 @router.callback_query(F.data.startswith("hist:edit:"))
@@ -366,6 +502,7 @@ async def history_cancel_order(
             order.id,
             editable=order_is_local_editable(order),
             has_pdfs=_has_pdfs(order),
+            can_fetch_pdf=_can_fetch_pdf(order),
             page=0,
         ),
     )
@@ -417,29 +554,63 @@ async def history_delete_order(
 
 
 @router.message(Command("pdf"))
-async def resend_pdf(message: Message, session_factory: async_sessionmaker[AsyncSession]) -> None:
+async def resend_pdf(
+    message: Message,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+    settings: Settings,
+) -> None:
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Использование: <code>/pdf 2026-000001</code>")
-        return
-    number = parts[1].strip()
-    async with session_factory() as session:
-        result = await session.execute(
-            select(Order).where(
-                Order.our_number == number,
-                Order.telegram_user_id == message.from_user.id,
-            )
+        await message.answer(
+            "Использование: <code>/pdf 2026-000001</code>\n"
+            "Или просто отправьте номер заказа."
         )
-        order = result.scalar_one_or_none()
-    if not order:
-        await message.answer("Заказ не найден.")
         return
-    sent = False
-    if order.waybill_path and Path(order.waybill_path).exists():
-        await message.answer_document(FSInputFile(order.waybill_path))
-        sent = True
-    if order.barcode_path and Path(order.barcode_path).exists():
-        await message.answer_document(FSInputFile(order.barcode_path), reply_markup=main_menu())
-        sent = True
-    if not sent:
-        await message.answer("PDF для этого заказа ещё нет.", reply_markup=main_menu())
+    await _deliver_pdf_by_number(
+        message,
+        parts[1].strip(),
+        session_factory=session_factory,
+        profiles=profiles,
+        settings=settings,
+    )
+
+
+@router.message(StateFilter(None), F.text.regexp(OUR_NUMBER_RE))
+async def resend_pdf_by_number(
+    message: Message,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+    settings: Settings,
+) -> None:
+    number = (message.text or "").strip()
+    await _deliver_pdf_by_number(
+        message,
+        number,
+        session_factory=session_factory,
+        profiles=profiles,
+        settings=settings,
+    )
+
+
+async def _deliver_pdf_by_number(
+    message: Message,
+    number: str,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+    settings: Settings,
+) -> None:
+    order = await _get_user_order_by_number(session_factory, number, message.from_user.id)
+    if not order:
+        await message.answer("Заказ не найден.", reply_markup=main_menu())
+        return
+    cdek = await _get_cdek_client(session_factory, profiles, message.from_user.id)
+    await _send_order_pdfs(
+        message,
+        order,
+        cdek=cdek,
+        session_factory=session_factory,
+        pdf_storage_path=settings.pdf_storage_path,
+        with_menu=True,
+    )

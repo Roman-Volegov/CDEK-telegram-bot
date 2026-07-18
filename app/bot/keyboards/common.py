@@ -210,12 +210,27 @@ def history_order_kb(
     has_pdfs: bool,
     page: int = 0,
     can_fetch_pdf: bool = False,
+    is_paid: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if editable:
         builder.row(
             InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hist:edit:{order_id}"),
             InlineKeyboardButton(text="🚫 Отменить", callback_data=f"hist:cancel:{order_id}"),
+        )
+    if is_paid:
+        builder.row(
+            InlineKeyboardButton(
+                text="↩️ Пометить не оплаченным",
+                callback_data=f"hist:unpay:{order_id}:{page}",
+            ),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Пометить оплаченным",
+                callback_data=f"hist:pay:{order_id}:{page}",
+            ),
         )
     builder.row(
         InlineKeyboardButton(text="🗑 Удалить из базы", callback_data=f"hist:delete:{order_id}:{page}"),

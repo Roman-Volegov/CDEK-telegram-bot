@@ -21,7 +21,7 @@ from app.bot.keyboards.common import (
 )
 from app.bot.states import HistoryStates
 from app.config import Settings
-from app.db.models import Order
+from app.db.models import CdekPayment, Order
 from app.services.cdek import CdekClient
 from app.services.profile import ProfileService, load_runtime_for_user
 
@@ -50,6 +50,14 @@ def _format_cost(total_sum: float | None, *, in_cdek: bool) -> str:
     return f"{total_sum:.0f} ₽"
 
 
+def _is_paid(order: Order) -> bool:
+    return order.payment_id is not None
+
+
+def _payment_label(order: Order) -> str:
+    return "оплачен" if _is_paid(order) else "не оплачен"
+
+
 def _format_order_line(
     idx: int,
     order: Order,
@@ -62,6 +70,7 @@ def _format_order_line(
     return (
         f"<b>{idx}. {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
+        f"Оплата: {_payment_label(order)}\n"
         f"Адрес: {order.to_address}\n"
         f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
         f"Стоимость: {_format_cost(cdek_total_sum, in_cdek=in_cdek)}\n"
@@ -78,9 +87,11 @@ def _format_order_detail(
     cdek_number = order.cdek_number or "—"
     item = float(order.item_cost or 0)
     in_cdek = bool(order.cdek_uuid)
+    paid_extra = f" (запись №{order.payment_id})" if order.payment_id else ""
     return (
         f"<b>Заказ {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
+        f"Оплата: {_payment_label(order)}{paid_extra}\n"
         f"Адрес: {order.to_address}\n"
         f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
         f"Тариф: {order.tariff_name or order.tariff_code}\n"
@@ -595,6 +606,37 @@ def _parse_view_callback(data: str | None) -> tuple[int | None, int]:
     return order_id, page
 
 
+async def _render_order_card(
+    callback: CallbackQuery,
+    order: Order,
+    *,
+    page: int,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+    answer_text: str | None = None,
+) -> None:
+    cdek = await _get_cdek_client(session_factory, profiles, callback.from_user.id)
+    status, total_sum = await _resolve_live_info(
+        order, cdek, session_factory=session_factory
+    )
+    assert callback.message is not None
+    await callback.message.edit_text(
+        _format_order_detail(order, status, cdek_total_sum=total_sum),
+        reply_markup=history_order_kb(
+            order.id,
+            editable=order_is_local_editable(order),
+            has_pdfs=_has_pdfs(order),
+            can_fetch_pdf=_can_fetch_pdf(order),
+            is_paid=_is_paid(order),
+            page=page,
+        ),
+    )
+    if answer_text:
+        await callback.answer(answer_text)
+    else:
+        await callback.answer()
+
+
 @router.callback_query(F.data.startswith("hist:view:"))
 async def history_view_order(
     callback: CallbackQuery,
@@ -609,21 +651,13 @@ async def history_view_order(
     if not order:
         await callback.answer("Заказ не найден", show_alert=True)
         return
-    cdek = await _get_cdek_client(session_factory, profiles, callback.from_user.id)
-    status, total_sum = await _resolve_live_info(
-        order, cdek, session_factory=session_factory
+    await _render_order_card(
+        callback,
+        order,
+        page=page,
+        session_factory=session_factory,
+        profiles=profiles,
     )
-    await callback.message.edit_text(
-        _format_order_detail(order, status, cdek_total_sum=total_sum),
-        reply_markup=history_order_kb(
-            order.id,
-            editable=order_is_local_editable(order),
-            has_pdfs=_has_pdfs(order),
-            can_fetch_pdf=_can_fetch_pdf(order),
-            page=page,
-        ),
-    )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("hist:pdf:"))
@@ -716,14 +750,104 @@ async def history_cancel_order(
             editable=order_is_local_editable(order),
             has_pdfs=_has_pdfs(order),
             can_fetch_pdf=_can_fetch_pdf(order),
+            is_paid=_is_paid(order),
             page=0,
         ),
     )
     await callback.answer("Заказ отменён")
 
 
+@router.callback_query(F.data.startswith("hist:pay:"))
+async def history_mark_paid(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+) -> None:
+    order_id, page = _parse_order_page_callback(callback.data, prefix_parts=2)
+    if order_id is None or callback.from_user is None:
+        await callback.answer("Некорректный заказ", show_alert=True)
+        return
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Order).where(
+                Order.id == order_id,
+                Order.telegram_user_id == callback.from_user.id,
+            )
+        )
+        order = result.scalar_one_or_none()
+        if not order:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        if order.payment_id is not None:
+            await callback.answer("Уже оплачен", show_alert=True)
+            return
+        total = float(order.delivery_sum or 0)
+        payment = CdekPayment(
+            telegram_user_id=callback.from_user.id,
+            total_sum=total,
+            orders_count=1,
+        )
+        session.add(payment)
+        await session.flush()
+        order.payment_id = payment.id
+        await session.commit()
+        # detach values we need after session closes
+        order_id_saved = order.id
+
+    order = await _get_user_order(session_factory, order_id_saved, callback.from_user.id)
+    assert order is not None
+    await _render_order_card(
+        callback,
+        order,
+        page=page,
+        session_factory=session_factory,
+        profiles=profiles,
+        answer_text="Помечен оплаченным",
+    )
+
+
+@router.callback_query(F.data.startswith("hist:unpay:"))
+async def history_mark_unpaid(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    profiles: ProfileService,
+) -> None:
+    order_id, page = _parse_order_page_callback(callback.data, prefix_parts=2)
+    if order_id is None or callback.from_user is None:
+        await callback.answer("Некорректный заказ", show_alert=True)
+        return
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Order).where(
+                Order.id == order_id,
+                Order.telegram_user_id == callback.from_user.id,
+            )
+        )
+        order = result.scalar_one_or_none()
+        if not order:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        if order.payment_id is None:
+            await callback.answer("Уже не оплачен", show_alert=True)
+            return
+        order.payment_id = None
+        await session.commit()
+        order_id_saved = order.id
+
+    order = await _get_user_order(session_factory, order_id_saved, callback.from_user.id)
+    assert order is not None
+    await _render_order_card(
+        callback,
+        order,
+        page=page,
+        session_factory=session_factory,
+        profiles=profiles,
+        answer_text="Помечен не оплаченным",
+    )
+
+
 def _parse_order_page_callback(data: str | None, *, prefix_parts: int) -> tuple[int | None, int]:
-    """hist:delete:{id}:{page} / hist:delete_yes:{id}:{page}"""
+    """hist:delete:{id}:{page} / hist:delete_yes:{id}:{page} / hist:pay:{id}:{page}"""
     parts = (data or "").split(":")
     if len(parts) < prefix_parts + 1 or not parts[prefix_parts].isdigit():
         return None, 0

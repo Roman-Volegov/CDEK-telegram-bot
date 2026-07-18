@@ -37,27 +37,40 @@ def _local_status_label(order: Order) -> str:
     return mapping.get(order.status, order.status)
 
 
+def _order_total_cost(order: Order) -> float:
+    """Полная стоимость: товар + доставка."""
+    item = float(order.item_cost or 0)
+    delivery = float(order.delivery_sum or 0)
+    return item + delivery
+
+
 def _format_order_line(idx: int, order: Order, status_label: str) -> str:
-    cdek = order.cdek_number or order.cdek_uuid or "—"
+    cdek_number = order.cdek_number or "—"
+    total = _order_total_cost(order)
     return (
         f"<b>{idx}. {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
         f"Адрес: {order.to_address}\n"
-        f"Получатель: {order.recipient_name}\n"
-        f"CDEK: <code>{cdek}</code>"
+        f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
+        f"Стоимость: {total:.0f} ₽\n"
+        f"Номер СДЭК: <code>{cdek_number}</code>"
     )
 
 
 def _format_order_detail(order: Order, status_label: str) -> str:
-    cdek = order.cdek_number or order.cdek_uuid or "—"
+    cdek_number = order.cdek_number or "—"
+    total = _order_total_cost(order)
+    delivery = float(order.delivery_sum or 0)
+    item = float(order.item_cost or 0)
     return (
         f"<b>Заказ {order.our_number}</b>\n"
         f"Статус: {status_label}\n"
         f"Адрес: {order.to_address}\n"
         f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
         f"Тариф: {order.tariff_name or order.tariff_code}\n"
-        f"Стоимость товара: {float(order.item_cost):.0f} ₽\n"
-        f"CDEK: <code>{cdek}</code>"
+        f"Товар: {item:.0f} ₽ · Доставка: {delivery:.0f} ₽\n"
+        f"Полная стоимость: {total:.0f} ₽\n"
+        f"Номер СДЭК: <code>{cdek_number}</code>"
     )
 
 

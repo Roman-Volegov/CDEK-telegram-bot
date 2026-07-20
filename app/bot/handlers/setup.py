@@ -39,7 +39,10 @@ async def start_setup(message: Message, state: FSMContext, *, restart: bool = Fa
         "🛠 <b>Мастер начальной настройки</b>\n\n"
         "Нужно один раз указать секреты СДЭК/DaData и параметры отправки.\n"
         "Секреты хранятся <b>зашифрованно</b> и привязаны к вашему Telegram.\n\n"
-        "1/11. Отправьте <b>CDEK_CLIENT_ID</b>:"
+        "1/11. Для работы бота необходимо зарегистрировать личный кабинет на сайте "
+        '<a href="https://www.cdek.ru">CDEK.ru</a>. '
+        "API-ключи доступны в меню профиля «Интеграции».\n\n"
+        "Отправьте <b>CDEK_CLIENT_ID</b>:"
     )
     if restart:
         text = "Начинаем настройку заново.\n\n" + text

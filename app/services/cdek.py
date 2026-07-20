@@ -421,6 +421,16 @@ class CdekClient:
         return data.get("entity") or {}
 
     @staticmethod
+    def tracking_url(cdek_number: str | None) -> str | None:
+        """Публичная ссылка на заказ на сайте СДЭК."""
+        number = (cdek_number or "").strip()
+        if not number:
+            return None
+        from urllib.parse import quote
+
+        return f"https://www.cdek.ru/ru/tracking?order_id={quote(number, safe='')}"
+
+    @staticmethod
     def latest_status_label(entity: dict[str, Any] | None) -> str | None:
         """Актуальный статус заказа из ответа СДЭК."""
         if not entity:

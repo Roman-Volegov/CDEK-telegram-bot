@@ -67,15 +67,19 @@ def _format_order_line(
 ) -> str:
     cdek_number = order.cdek_number or "—"
     in_cdek = bool(order.cdek_uuid)
-    return (
-        f"<b>{idx}. {order.our_number}</b>\n"
-        f"Статус: {status_label}\n"
-        f"Оплата: {_payment_label(order)}\n"
-        f"Адрес: {order.to_address}\n"
-        f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
-        f"Стоимость: {_format_cost(cdek_total_sum, in_cdek=in_cdek)}\n"
-        f"Номер СДЭК: <code>{cdek_number}</code>"
-    )
+    track_url = CdekClient.tracking_url(order.cdek_number)
+    lines = [
+        f"<b>{idx}. {order.our_number}</b>",
+        f"Статус: {status_label}",
+        f"Оплата: {_payment_label(order)}",
+        f"Адрес: {order.to_address}",
+        f"Получатель: {order.recipient_name}, {order.recipient_phone}",
+        f"Стоимость: {_format_cost(cdek_total_sum, in_cdek=in_cdek)}",
+        f"Номер СДЭК: <code>{cdek_number}</code>",
+    ]
+    if track_url:
+        lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')
+    return "\n".join(lines)
 
 
 def _format_order_detail(
@@ -88,17 +92,21 @@ def _format_order_detail(
     item = float(order.item_cost or 0)
     in_cdek = bool(order.cdek_uuid)
     paid_extra = f" (запись №{order.payment_id})" if order.payment_id else ""
-    return (
-        f"<b>Заказ {order.our_number}</b>\n"
-        f"Статус: {status_label}\n"
-        f"Оплата: {_payment_label(order)}{paid_extra}\n"
-        f"Адрес: {order.to_address}\n"
-        f"Получатель: {order.recipient_name}, {order.recipient_phone}\n"
-        f"Тариф: {order.tariff_name or order.tariff_code}\n"
-        f"Стоимость товара: {item:.0f} ₽\n"
-        f"Стоимость заказа (СДЭК): {_format_cost(cdek_total_sum, in_cdek=in_cdek)}\n"
-        f"Номер СДЭК: <code>{cdek_number}</code>"
-    )
+    track_url = CdekClient.tracking_url(order.cdek_number)
+    lines = [
+        f"<b>Заказ {order.our_number}</b>",
+        f"Статус: {status_label}",
+        f"Оплата: {_payment_label(order)}{paid_extra}",
+        f"Адрес: {order.to_address}",
+        f"Получатель: {order.recipient_name}, {order.recipient_phone}",
+        f"Тариф: {order.tariff_name or order.tariff_code}",
+        f"Стоимость товара: {item:.0f} ₽",
+        f"Стоимость заказа (СДЭК): {_format_cost(cdek_total_sum, in_cdek=in_cdek)}",
+        f"Номер СДЭК: <code>{cdek_number}</code>",
+    ]
+    if track_url:
+        lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')
+    return "\n".join(lines)
 
 
 def _has_pdfs(order: Order) -> bool:

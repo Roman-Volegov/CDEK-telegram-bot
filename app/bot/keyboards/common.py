@@ -24,6 +24,37 @@ def payment_confirm_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def admin_user_pick_kb(
+    users: list[tuple[int, str]],
+    *,
+    prefix: str,
+    include_self: bool = True,
+) -> InlineKeyboardMarkup:
+    """
+    Выбор пользователя админом.
+    users: [(telegram_user_id, button_label), ...]
+    prefix: histuser | payuser
+    """
+    builder = InlineKeyboardBuilder()
+    if include_self:
+        builder.row(
+            InlineKeyboardButton(
+                text="👤 Я (мои заказы)",
+                callback_data=f"{prefix}:self",
+            )
+        )
+    for user_id, label in users[:40]:
+        text = label if len(label) <= 60 else label[:57] + "…"
+        builder.row(
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"{prefix}:{user_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}:cancel"))
+    return builder.as_markup()
+
+
 def request_access_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[

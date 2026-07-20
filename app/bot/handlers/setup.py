@@ -159,7 +159,11 @@ async def setup_sender_phone(message: Message, state: FSMContext) -> None:
     draft["sender_phone"] = phone
     await state.update_data(setup_draft=draft)
     await state.set_state(SetupStates.dadata_api_key)
-    await message.answer("7/11. Отправьте <b>DADATA_API_KEY</b>:")
+    await message.answer(
+        "7/11. Для работы бота необходима бесплатная регистрация в сервисе "
+        '<a href="https://dadata.ru">DaData.ru</a>.\n\n'
+        "Отправьте <b>DADATA_API_KEY</b>:"
+    )
 
 
 @router.message(SetupStates.dadata_api_key, F.text, ~F.text.in_(MENU_TEXTS))

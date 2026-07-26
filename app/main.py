@@ -27,10 +27,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def init_schema_with_retry(
+    engine,
+    *,
+    attempts: int = 10,
+    initial_delay: float = 2.0,
+    max_delay: float = 30.0,
+) -> None:
+    """Ждём готовности PostgreSQL при старте/перезагрузке VPS."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await init_schema(engine)
+            if attempt > 1:
+                logger.info("Database connection restored on attempt %s", attempt)
+            return
+        except Exception:
+            if attempt >= attempts:
+                logger.exception(
+                    "Database is unavailable after %s connection attempts", attempts
+                )
+                raise
+            delay = min(initial_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(
+                "Database is unavailable (attempt %s/%s); retrying in %.0f seconds",
+                attempt,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+
 async def main() -> None:
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-    await init_schema(engine)
+    await init_schema_with_retry(engine)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     secret_box = SecretBox(settings.encryption_key)

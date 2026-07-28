@@ -1131,9 +1131,15 @@ async def order_create(
             await session.commit()
 
         track_url = CdekClient.tracking_url(cdek_number)
+        city = data.get("city") or "—"
+        recipient_name = data.get("recipient_name") or "—"
+        recipient_phone = data.get("recipient_phone") or "—"
         created_lines = [
             f"✅ Заказ <b>{our_number}</b> создан",
             f"Трек СДЭК: <code>{cdek_number or 'ожидается'}</code>",
+            f"Город: {city}",
+            f"Получатель: {recipient_name}",
+            f"Телефон: <code>{recipient_phone}</code>",
         ]
         if track_url:
             created_lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')

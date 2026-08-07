@@ -203,6 +203,38 @@ class CdekClient:
             )
         return matches
 
+    def _parse_delivery_points(
+        self, data: Any, *, default_city_code: int | None = None
+    ) -> list[PickupPoint]:
+        items = data if isinstance(data, list) else (data.get("deliverypoints") or data.get("items") or [])
+        points: list[PickupPoint] = []
+        for item in items or []:
+            location = item.get("location") or {}
+            lat = location.get("latitude")
+            lon = location.get("longitude")
+            if lat is None and isinstance(location.get("coordinates"), dict):
+                lat = location["coordinates"].get("latitude")
+                lon = location["coordinates"].get("longitude")
+            address = location.get("address") or item.get("address") or ""
+            address_full = location.get("address_full") or address
+            raw_city = location.get("city_code")
+            if raw_city is None:
+                raw_city = default_city_code
+            points.append(
+                PickupPoint(
+                    code=str(item.get("code") or ""),
+                    name=str(item.get("name") or item.get("code") or ""),
+                    address=address,
+                    address_full=address_full,
+                    city_code=int(raw_city) if raw_city is not None else None,
+                    latitude=float(lat) if lat is not None else None,
+                    longitude=float(lon) if lon is not None else None,
+                    work_time=item.get("work_time"),
+                    point_type=str(item.get("type") or "PVZ"),
+                )
+            )
+        return [p for p in points if p.code]
+
     async def get_delivery_points(
         self,
         *,
@@ -219,32 +251,35 @@ class CdekClient:
             params["postal_code"] = int(postal_code)
 
         data = await self._request("GET", "/deliverypoints", params=params)
-        # API может вернуть список или обёртку
-        items = data if isinstance(data, list) else (data.get("deliverypoints") or data.get("items") or [])
-        points: list[PickupPoint] = []
-        for item in items or []:
-            location = item.get("location") or {}
-            lat = location.get("latitude")
-            lon = location.get("longitude")
-            if lat is None and isinstance(location.get("coordinates"), dict):
-                lat = location["coordinates"].get("latitude")
-                lon = location["coordinates"].get("longitude")
-            address = location.get("address") or item.get("address") or ""
-            address_full = location.get("address_full") or address
-            points.append(
-                PickupPoint(
-                    code=str(item.get("code") or ""),
-                    name=str(item.get("name") or item.get("code") or ""),
-                    address=address,
-                    address_full=address_full,
-                    city_code=location.get("city_code") or city_code,
-                    latitude=float(lat) if lat is not None else None,
-                    longitude=float(lon) if lon is not None else None,
-                    work_time=item.get("work_time"),
-                    point_type=str(item.get("type") or point_type),
-                )
-            )
-        return [p for p in points if p.code]
+        return self._parse_delivery_points(data, default_city_code=city_code)
+
+    async def get_delivery_point_by_code(self, code: str) -> PickupPoint | None:
+        """Ищет ПВЗ/офис по коду (например MSK45)."""
+        code = (code or "").strip().upper()
+        if not code:
+            return None
+        data = await self._request("GET", "/deliverypoints", params={"code": code})
+        points = self._parse_delivery_points(data)
+        for point in points:
+            if point.code.upper() == code:
+                return point
+        return points[0] if points else None
+
+    async def resolve_from_city_code(self, from_city_code: int | None = None) -> int | None:
+        """Код города отправления: явный либо из ПВЗ отгрузки в профиле."""
+        if from_city_code:
+            return from_city_code
+        shipment = (self._settings.cdek_shipment_point or "").strip()
+        if not shipment:
+            return None
+        try:
+            point = await self.get_delivery_point_by_code(shipment)
+        except Exception:
+            logger.exception("failed to resolve city for shipment point %s", shipment)
+            return None
+        if point and point.city_code:
+            return int(point.city_code)
+        return None
 
     async def find_pvz_for_address(
         self,
@@ -321,9 +356,18 @@ class CdekClient:
         height: int,
         from_city_code: int | None = None,
     ) -> list[TariffOption]:
+        resolved_from = await self.resolve_from_city_code(from_city_code)
+        if resolved_from is None:
+            # Контракт требует from_location; без ПВЗ — последний fallback (Москва).
+            logger.warning(
+                "from_city_code неизвестен (shipment=%s), fallback code=44",
+                self._settings.cdek_shipment_point,
+            )
+            resolved_from = 44
+
         body: dict[str, Any] = {
             "type": self._settings.cdek_order_type,
-            "from_location": {},
+            "from_location": {"code": resolved_from},
             "to_location": {"code": to_city_code},
             "packages": [
                 {
@@ -334,15 +378,6 @@ class CdekClient:
                 }
             ],
         }
-        # Отправка всегда с ПВЗ: указываем shipment через from_location города ПВЗ
-        # либо через код города склада. Если задан только shipment_point,
-        # CDEK сам привяжет склад при создании заказа; для калькулятора нужен город.
-        if from_city_code:
-            body["from_location"] = {"code": from_city_code}
-        else:
-            # Без кода города from_location всё равно обязателен по контракту —
-            # используем code из ПВЗ через отдельный lookup; fallback Москва.
-            body["from_location"] = {"code": 44}
 
         data = await self._request("POST", "/calculator/tarifflist", json=body)
         tariffs: list[TariffOption] = []
@@ -386,6 +421,16 @@ class CdekClient:
         return data.get("entity") or {}
 
     @staticmethod
+    def tracking_url(cdek_number: str | None) -> str | None:
+        """Публичная ссылка на заказ на сайте СДЭК."""
+        number = (cdek_number or "").strip()
+        if not number:
+            return None
+        from urllib.parse import quote
+
+        return f"https://www.cdek.ru/ru/tracking?order_id={quote(number, safe='')}"
+
+    @staticmethod
     def latest_status_label(entity: dict[str, Any] | None) -> str | None:
         """Актуальный статус заказа из ответа СДЭК."""
         if not entity:
@@ -402,6 +447,40 @@ class CdekClient:
         if name and code and code not in name:
             return f"{name} ({code})"
         return name or code or None
+
+    @staticmethod
+    def order_total_sum(entity: dict[str, Any] | None) -> float | None:
+        """
+        Итоговая стоимость заказа из ответа СДЭК.
+        Приоритет: delivery_detail.total_sum → delivery_detail.delivery_sum → услуги.
+        """
+        if not entity:
+            return None
+        detail = entity.get("delivery_detail") or {}
+        for key in ("total_sum", "delivery_sum"):
+            raw = detail.get(key)
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+
+        services = entity.get("services") or []
+        service_total = 0.0
+        found = False
+        for svc in services:
+            raw = svc.get("total_sum")
+            if raw is None:
+                raw = svc.get("sum")
+            if raw is None:
+                continue
+            try:
+                service_total += float(raw)
+                found = True
+            except (TypeError, ValueError):
+                continue
+        return service_total if found else None
 
     async def get_order_status_label(self, order_uuid: str) -> str | None:
         entity = await self.get_order(order_uuid)

@@ -39,7 +39,10 @@ async def start_setup(message: Message, state: FSMContext, *, restart: bool = Fa
         "🛠 <b>Мастер начальной настройки</b>\n\n"
         "Нужно один раз указать секреты СДЭК/DaData и параметры отправки.\n"
         "Секреты хранятся <b>зашифрованно</b> и привязаны к вашему Telegram.\n\n"
-        "1/11. Отправьте <b>CDEK_CLIENT_ID</b>:"
+        "1/11. Для работы бота необходимо зарегистрировать личный кабинет на сайте "
+        '<a href="https://www.cdek.ru">CDEK.ru</a>. '
+        "API-ключи доступны в меню профиля «Интеграции».\n\n"
+        "Отправьте <b>CDEK_CLIENT_ID</b>:"
     )
     if restart:
         text = "Начинаем настройку заново.\n\n" + text
@@ -159,7 +162,11 @@ async def setup_sender_phone(message: Message, state: FSMContext) -> None:
     draft["sender_phone"] = phone
     await state.update_data(setup_draft=draft)
     await state.set_state(SetupStates.dadata_api_key)
-    await message.answer("7/11. Отправьте <b>DADATA_API_KEY</b>:")
+    await message.answer(
+        "7/11. Для работы бота необходима бесплатная регистрация в сервисе "
+        '<a href="https://dadata.ru">DaData.ru</a>.\n\n'
+        "Отправьте <b>DADATA_API_KEY</b>:"
+    )
 
 
 @router.message(SetupStates.dadata_api_key, F.text, ~F.text.in_(MENU_TEXTS))

@@ -8,11 +8,51 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📦 Рассчитать"), KeyboardButton(text="🚚 Создать заказ")],
-            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="⚙️ Настройки")],
-            [KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="💳 Оплатить за СДЭК")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
     )
+
+
+def payment_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data="payment:confirm"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="payment:cancel"),
+    )
+    return builder.as_markup()
+
+
+def admin_user_pick_kb(
+    users: list[tuple[int, str]],
+    *,
+    prefix: str,
+    include_self: bool = True,
+) -> InlineKeyboardMarkup:
+    """
+    Выбор пользователя админом.
+    users: [(telegram_user_id, button_label), ...]
+    prefix: histuser | payuser
+    """
+    builder = InlineKeyboardBuilder()
+    if include_self:
+        builder.row(
+            InlineKeyboardButton(
+                text="👤 Я (мои заказы)",
+                callback_data=f"{prefix}:self",
+            )
+        )
+    for user_id, label in users[:40]:
+        text = label if len(label) <= 60 else label[:57] + "…"
+        builder.row(
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"{prefix}:{user_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"{prefix}:cancel"))
+    return builder.as_markup()
 
 
 def request_access_kb() -> ReplyKeyboardMarkup:
@@ -170,6 +210,27 @@ def history_page_kb(
         )
     if nav:
         builder.row(*nav)
+    builder.row(
+        InlineKeyboardButton(
+            text="🗑 Удалить без статуса СДЭК",
+            callback_data="hist:purge_nostatus",
+        )
+    )
+    return builder.as_markup()
+
+
+def history_purge_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, удалить все",
+            callback_data="hist:purge_nostatus_yes",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="hist:page:0",
+        ),
+    )
     return builder.as_markup()
 
 
@@ -179,6 +240,8 @@ def history_order_kb(
     editable: bool,
     has_pdfs: bool,
     page: int = 0,
+    can_fetch_pdf: bool = False,
+    is_paid: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if editable:
@@ -186,14 +249,44 @@ def history_order_kb(
             InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"hist:edit:{order_id}"),
             InlineKeyboardButton(text="🚫 Отменить", callback_data=f"hist:cancel:{order_id}"),
         )
+    if is_paid:
         builder.row(
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"hist:delete:{order_id}"),
+            InlineKeyboardButton(
+                text="↩️ Пометить не оплаченным",
+                callback_data=f"hist:unpay:{order_id}:{page}",
+            ),
         )
-    if has_pdfs:
+    else:
         builder.row(
-            InlineKeyboardButton(text="📄 PDF", callback_data=f"hist:pdf:{order_id}"),
+            InlineKeyboardButton(
+                text="✅ Пометить оплаченным",
+                callback_data=f"hist:pay:{order_id}:{page}",
+            ),
+        )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удалить из базы", callback_data=f"hist:delete:{order_id}:{page}"),
+    )
+    if has_pdfs or can_fetch_pdf:
+        label = "📄 PDF" if has_pdfs else "📄 Выгрузить PDF"
+        builder.row(
+            InlineKeyboardButton(text=label, callback_data=f"hist:pdf:{order_id}"),
         )
     builder.row(
         InlineKeyboardButton(text="⬅️ К списку", callback_data=f"hist:page:{page}"),
+    )
+    return builder.as_markup()
+
+
+def history_delete_confirm_kb(order_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, удалить",
+            callback_data=f"hist:delete_yes:{order_id}:{page}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Нет",
+            callback_data=f"hist:view:{order_id}:{page}",
+        ),
     )
     return builder.as_markup()

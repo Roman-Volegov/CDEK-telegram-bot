@@ -31,7 +31,7 @@ from app.bot.states import OrderStates
 from app.config import Settings
 from app.db.models import Order
 from app.db.numerator import next_order_number
-from app.services.cdek import TariffOption
+from app.services.cdek import CdekClient, TariffOption
 from app.services.profile import ProfileService
 
 logger = logging.getLogger(__name__)
@@ -1130,18 +1130,32 @@ async def order_create(
             db_order.barcode_path = str(barcode_path)
             await session.commit()
 
-        await callback.message.edit_text(
-            f"✅ Заказ <b>{our_number}</b> создан\n"
-            f"Трек СДЭК: <code>{cdek_number or 'ожидается'}</code>\n"
-            f"UUID: <code>{created.uuid}</code>\n\nОтправляю PDF…"
-        )
+        track_url = CdekClient.tracking_url(cdek_number)
+        city = data.get("city") or "—"
+        recipient_name = data.get("recipient_name") or "—"
+        recipient_phone = data.get("recipient_phone") or "—"
+        created_lines = [
+            f"✅ Заказ <b>{our_number}</b> создан",
+            f"Трек СДЭК: <code>{cdek_number or 'ожидается'}</code>",
+            f"Город: {city}",
+            f"Получатель: {recipient_name}",
+            f"Телефон: <code>{recipient_phone}</code>",
+        ]
+        if track_url:
+            created_lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')
+        created_lines.append("")
+        created_lines.append("Отправляю PDF…")
+        await callback.message.edit_text("\n".join(created_lines))
         await callback.message.answer_document(
             FSInputFile(waybill_path, filename=waybill_path.name),
             caption=f"Накладная {our_number}",
         )
+        barcode_caption = f"Штрихкоды {our_number}"
+        if track_url:
+            barcode_caption += f'\n<a href="{track_url}">Открыть на сайте СДЭК</a>'
         await callback.message.answer_document(
             FSInputFile(barcode_path, filename=barcode_path.name),
-            caption=f"Штрихкоды {our_number}",
+            caption=barcode_caption,
             reply_markup=main_menu(),
         )
         await state.clear()
@@ -1177,7 +1191,9 @@ async def order_create(
             await callback.message.edit_text(
                 f"⚠️ Заказ <b>{our_number}</b> создан в СДЭК, но PDF не готовы:\n"
                 f"<code>{exc}</code>\n\n"
-                f"Отправьте номер <code>{our_number}</code> позже для PDF."
+                f"Позже отправьте номер <code>{our_number}</code> "
+                f"или команду <code>/pdf {our_number}</code> — "
+                f"бот докачает PDF из СДЭК."
             )
         else:
             await callback.message.edit_text(f"❌ Не удалось создать заказ: {exc}")

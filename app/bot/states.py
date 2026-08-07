@@ -1,6 +1,17 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class PaymentStates(StatesGroup):
+    pick_user = State()
+    confirm = State()
+
+
+class HistoryStates(StatesGroup):
+    pick_user = State()
+    browsing = State()
+    purge_confirm = State()
+
+
 class SetupStates(StatesGroup):
     cdek_client_id = State()
     cdek_client_secret = State()

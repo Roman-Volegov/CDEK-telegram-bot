@@ -12,6 +12,17 @@ from app.db.models import Base
 logger = logging.getLogger(__name__)
 
 
+def _ensure_orders_comment(sync_conn) -> None:
+    insp = inspect(sync_conn)
+    if "orders" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("orders")}
+    if "comment" in cols:
+        return
+    logger.info("Adding orders.comment column")
+    sync_conn.execute(text("ALTER TABLE orders ADD COLUMN comment VARCHAR(255)"))
+
+
 def _ensure_orders_payment_id(sync_conn) -> None:
     insp = inspect(sync_conn)
     if "orders" not in insp.get_table_names():
@@ -30,3 +41,4 @@ async def init_schema(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_orders_payment_id)
+        await conn.run_sync(_ensure_orders_comment)

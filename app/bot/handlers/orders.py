@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 router = Router(name="order")
 
 PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+COMMENT_CLEAR = {"-", "нет", "удалить", "очистить", "без комментария"}
+COMMENT_MAX_LEN = 255
 
 
 def _normalize_phone(raw: str) -> str:
@@ -49,6 +51,15 @@ def _normalize_phone(raw: str) -> str:
     elif digits.isdigit() and len(digits) == 10:
         digits = "+7" + digits
     return digits
+
+
+def _normalize_comment(raw: str) -> str | None:
+    text = (raw or "").strip()
+    if not text or text.casefold() in COMMENT_CLEAR:
+        return None
+    if len(text) > COMMENT_MAX_LEN:
+        text = text[:COMMENT_MAX_LEN].rstrip()
+    return text
 
 
 def _tariff_to_pvz(data: dict) -> bool:
@@ -195,6 +206,7 @@ async def load_saved_order_for_edit(
         recipient_name=order.recipient_name,
         recipient_phone=order.recipient_phone,
         item_cost=float(order.item_cost),
+        order_comment=order.comment,
         chosen_tariff={
             "tariff_code": int(order.tariff_code),
             "tariff_name": order.tariff_name or f"Тариф {order.tariff_code}",
@@ -909,6 +921,44 @@ async def order_edit_item_name_value(
     await _return_to_confirm_message(message, state, cfg)
 
 
+@router.callback_query(OrderStates.edit_menu, F.data == "edit:comment")
+async def order_edit_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    current = (data.get("order_comment") or "").strip() or "—"
+    await state.set_state(OrderStates.edit_comment)
+    await callback.message.edit_text(
+        f"Текущий комментарий: <b>{current}</b>\n\n"
+        "Введите комментарий к заказу (попадёт в СДЭК и на накладную).\n"
+        "Чтобы убрать комментарий, отправьте <code>-</code>."
+    )
+    await callback.answer()
+
+
+@router.message(OrderStates.edit_comment, F.text, ~F.text.in_(MENU_TEXTS))
+async def order_edit_comment_value(
+    message: Message,
+    state: FSMContext,
+    profiles: ProfileService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw = message.text or ""
+    if len(raw.strip()) > COMMENT_MAX_LEN and raw.strip().casefold() not in COMMENT_CLEAR:
+        await message.answer(
+            f"Слишком длинно. Максимум {COMMENT_MAX_LEN} символов, сейчас {len(raw.strip())}."
+        )
+        return
+    await state.update_data(order_comment=_normalize_comment(raw))
+    data = await state.get_data()
+    ready = await ensure_runtime(
+        message, state=state, profiles=profiles, session_factory=session_factory,
+        overrides=order_overrides_from_state(data),
+    )
+    if ready is None:
+        return
+    cfg, _, _ = ready
+    await _return_to_confirm_message(message, state, cfg)
+
+
 @router.callback_query(OrderStates.edit_menu, F.data == "edit:dims")
 async def order_edit_dims(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(OrderStates.edit_dimensions)
@@ -1085,6 +1135,7 @@ async def order_create(
             order.delivery_point = data.get("delivery_point")
             order.recipient_name = data["recipient_name"]
             order.recipient_phone = data["recipient_phone"]
+            order.comment = _normalize_comment(str(data.get("order_comment") or ""))
             order.item_cost = float(data["item_cost"])
             order.delivery_sum = float(tariff.get("delivery_sum") or 0)
             order.error_message = None
@@ -1103,6 +1154,7 @@ async def order_create(
             recipient_phone=data["recipient_phone"],
             item_cost=float(data["item_cost"]),
             delivery_point=data.get("delivery_point"),
+            comment=_normalize_comment(str(data.get("order_comment") or "")),
             weight=weight,
             length=length,
             width=width,
@@ -1134,6 +1186,7 @@ async def order_create(
         city = data.get("city") or "—"
         recipient_name = data.get("recipient_name") or "—"
         recipient_phone = data.get("recipient_phone") or "—"
+        comment = _normalize_comment(str(data.get("order_comment") or ""))
         created_lines = [
             f"✅ Заказ <b>{our_number}</b> создан",
             f"Трек СДЭК: <code>{cdek_number or 'ожидается'}</code>",
@@ -1141,6 +1194,8 @@ async def order_create(
             f"Получатель: {recipient_name}",
             f"Телефон: <code>{recipient_phone}</code>",
         ]
+        if comment:
+            created_lines.append(f"Комментарий: {comment}")
         if track_url:
             created_lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')
         created_lines.append("")

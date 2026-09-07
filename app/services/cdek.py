@@ -634,6 +634,7 @@ class CdekClient:
         recipient_phone: str,
         item_cost: float,
         delivery_point: str | None = None,
+        comment: str | None = None,
         weight: int | None = None,
         length: int | None = None,
         width: int | None = None,
@@ -694,5 +695,9 @@ class CdekClient:
                 "code": to_city_code,
                 "address": to_address,
             }
+
+        comment_text = (comment or "").strip()
+        if comment_text:
+            payload["comment"] = comment_text[:255]
 
         return payload

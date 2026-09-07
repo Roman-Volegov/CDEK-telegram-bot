@@ -129,6 +129,8 @@ def _format_order_detail(
         f"Стоимость заказа (СДЭК): {_format_cost(cdek_total_sum, in_cdek=in_cdek)}",
         f"Номер СДЭК: <code>{cdek_number}</code>",
     ]
+    if order.comment:
+        lines.insert(-1, f"Комментарий: {order.comment}")
     if track_url:
         lines.append(f'<a href="{track_url}">Открыть на сайте СДЭК</a>')
     return "\n".join(lines)

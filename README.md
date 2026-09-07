@@ -193,6 +193,27 @@ PDF сохраняются в `storage/pdfs/`:
 - **СДЭК API**: по вашему договору интернет-магазина  
 - **Хостинг**: VPS с Docker (1–2 GB RAM достаточно для MVP)
 
+## Очистка диска на VPS
+
+Docker build cache и журналы systemd могут забить диск — тогда PostgreSQL уходит в recovery, и бот перестаёт отвечать.
+
+Один раз на сервере:
+
+```bash
+sudo bash scripts/install-disk-cleanup.sh
+```
+
+Это включает:
+- лимит journald **100 МБ**
+- cron **каждый день в 04:00 UTC**: `docker builder prune`, висячие образы, вакуум журналов
+- ротацию логов контейнеров (**10 МБ × 3** файла) в `docker-compose.yml`
+
+Ручной прогон: `make cleanup-disk` или `sudo bash scripts/cleanup-disk.sh`.
+
+Тома БД и запущенные контейнеры скрипт не удаляет.
+
+---
+
 ## Типичные проблемы
 
 | Симптом | Что проверить |

@@ -35,6 +35,7 @@ class Order(Base):
 
     recipient_name: Mapped[str] = mapped_column(String(255), nullable=False)
     recipient_phone: Mapped[str] = mapped_column(String(32), nullable=False)
+    comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     item_cost: Mapped[float] = mapped_column(Float, nullable=False)
     delivery_sum: Mapped[float | None] = mapped_column(Float, nullable=True)

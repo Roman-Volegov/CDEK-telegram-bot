@@ -139,6 +139,9 @@ def edit_order_kb(*, show_delivery_pvz: bool = True) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📤 ПВЗ отправки", callback_data="edit:shipment"),
     )
     builder.row(
+        InlineKeyboardButton(text="💬 Комментарий", callback_data="edit:comment"),
+    )
+    builder.row(
         InlineKeyboardButton(text="⬅️ К подтверждению", callback_data="edit:back"),
     )
     return builder.as_markup()

@@ -82,12 +82,14 @@ def build_order_summary(cfg: RuntimeConfig, data: dict, cost: float) -> str:
     shipment = data.get("override_shipment_point") or cfg.cdek_shipment_point
     item_name = effective_item_name(cfg, data)
 
+    comment = str(data.get("order_comment") or "").strip() or "—"
     return (
         "<b>Проверьте заказ</b>\n\n"
         f"Куда: {dest}\n"
         f"Тариф: {tariff['tariff_name']} — {tariff['delivery_sum']:.0f} ₽\n"
         f"Получатель: {data['recipient_name']}, {data['recipient_phone']}\n"
         f"Товар: {item_name}, cost={cost:.0f} ₽, НП=0\n"
+        f"Комментарий: {comment}\n"
         f"Место: {weight} г, {length}×{width}×{height} см\n"
         f"Отправитель / seller: {sender_name}, {sender_phone}\n"
         f"Отгрузка: ПВЗ {shipment}\n"

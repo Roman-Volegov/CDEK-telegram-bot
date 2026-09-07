@@ -50,5 +50,6 @@ class OrderStates(StatesGroup):
     edit_recipient_phone = State()
     edit_item_cost = State()
     edit_item_name = State()
+    edit_comment = State()
     edit_address = State()
     edit_delivery_pvz = State()

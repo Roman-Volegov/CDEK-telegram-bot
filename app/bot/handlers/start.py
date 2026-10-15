@@ -5,7 +5,8 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers.setup import start_setup
-from app.bot.keyboards.common import main_menu, request_access_kb
+from app.bot.keyboards.common import main_menu, open_settings_kb, request_access_kb
+from app.config import Settings
 from app.services.access import (
     STATUS_PENDING,
     STATUS_REJECTED,
@@ -20,7 +21,7 @@ router = Router(name="start")
 HELP_TEXT = (
     "🤖 <b>Бот расчёта и заказов СДЭК</b>\n\n"
     "• Сначала новый пользователь запрашивает доступ у администратора\n"
-    "• <b>Настройки</b> — мастер секретов и параметров отправки\n"
+    "• <b>Настройки</b> — страница Mini App (запасной мастер: /setup)\n"
     "• <b>Рассчитать</b> — стоимость доставки по адресу\n"
     "• <b>Создать заказ</b> — оформление + PDF накладной и штрихкодов\n"
     "• <b>Мои заказы</b> — статусы СДЭК и повторная выгрузка PDF\n"
@@ -39,6 +40,7 @@ async def cmd_start(
     profiles: ProfileService,
     session_factory: async_sessionmaker[AsyncSession],
     access: AccessService,
+    settings: Settings,
     access_decision: AccessDecision | None = None,
 ) -> None:
     await state.clear()
@@ -80,6 +82,14 @@ async def cmd_start(
 
     profile = await profiles.get_or_none(session_factory, user.id)
     if not profiles.is_ready(profile):
+        if settings.miniapp_settings_url:
+            await message.answer(
+                "Доступ подтверждён. Откройте настройки — без них заказы не создаются.\n"
+                "Запасной мастер в чате: /setup",
+                reply_markup=open_settings_kb(settings.miniapp_settings_url),
+            )
+            await message.answer("Меню:", reply_markup=main_menu())
+            return
         await message.answer(
             "Доступ подтверждён. Для работы нужно один раз настроить бота под ваш аккаунт СДЭК.",
             reply_markup=main_menu(),

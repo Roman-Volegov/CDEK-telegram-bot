@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     pdf_storage_path: str = Field(default="./storage/pdfs", alias="PDF_STORAGE_PATH")
 
+    # Публичный HTTPS-адрес Mini App без хвоста. Пусто — кнопка «Настройки» остаётся в чате.
+    webapp_url: str = Field(default="", alias="WEBAPP_URL")
+    webapp_host: str = Field(default="0.0.0.0", alias="WEBAPP_HOST")
+    webapp_port: int = Field(default=8080, alias="WEBAPP_PORT")
+
     def _admin_parts(self) -> list[str]:
         parts = _split_parts(self.admin_telegram_ids)
         if parts:
@@ -84,6 +89,13 @@ class Settings(BaseSettings):
         if username and username.casefold() in self.admin_usernames:
             return True
         return False
+
+    @property
+    def miniapp_settings_url(self) -> str:
+        base = (self.webapp_url or "").strip().rstrip("/")
+        if not base:
+            return ""
+        return f"{base}/settings"
 
     def is_bootstrap_approved(
         self, user_id: int | None, username: str | None = None

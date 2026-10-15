@@ -45,6 +45,9 @@ services:
       PDF_STORAGE_PATH: /app/storage/pdfs
     volumes:
       - ./storage/pdfs:/app/storage/pdfs
+    ports:
+      # docker0: Caddy на этом VPS проксирует Mini App, порт не торчит в интернет
+      - "172.17.0.1:8088:8080"
     depends_on:
       db:
         condition: service_healthy

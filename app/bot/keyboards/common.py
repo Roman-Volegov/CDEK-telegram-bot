@@ -1,7 +1,26 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.services.cdek import PickupPoint, TariffOption
+
+
+def _settings_button() -> KeyboardButton:
+    url = ""
+    try:
+        from app.config import get_settings
+
+        url = get_settings().miniapp_settings_url
+    except Exception:
+        url = ""
+    if url:
+        return KeyboardButton(text="⚙️ Настройки", web_app=WebAppInfo(url=url))
+    return KeyboardButton(text="⚙️ Настройки")
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -9,10 +28,18 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📦 Рассчитать"), KeyboardButton(text="🚚 Создать заказ")],
             [KeyboardButton(text="📋 Мои заказы"), KeyboardButton(text="💳 Оплатить за СДЭК")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
+            [_settings_button(), KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
     )
+
+
+def open_settings_kb(url: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Открыть настройки", web_app=WebAppInfo(url=url))
+    )
+    return builder.as_markup()
 
 
 def payment_confirm_kb() -> InlineKeyboardMarkup:

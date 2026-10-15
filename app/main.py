@@ -18,6 +18,7 @@ from app.db.schema import init_schema
 from app.services.access import AccessService
 from app.services.crypto import SecretBox
 from app.services.profile import ProfileService
+from app.web.server import start_web, stop_web
 
 
 logging.basicConfig(
@@ -92,10 +93,12 @@ async def main() -> None:
             "заявки на доступ некому отправлять"
         )
 
+    web_runner = await start_web(settings, session_factory, profiles, access)
     logger.info("Bot starting (polling)")
     try:
         await dp.start_polling(bot)
     finally:
+        await stop_web(web_runner)
         await bot.session.close()
         await engine.dispose()
 

@@ -9,9 +9,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.keyboards.common import main_menu, setup_confirm_kb, yes_no_kb
+from app.bot.keyboards.common import main_menu, open_settings_kb, setup_confirm_kb, yes_no_kb
 from app.bot.menu import MENU_TEXTS
 from app.bot.states import SetupStates
+from app.config import Settings
 from app.services.profile import ProfileDraft, ProfileService
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,16 @@ async def cmd_settings(
     state: FSMContext,
     profiles: ProfileService,
     session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
 ) -> None:
     await state.clear()
+    if settings.miniapp_settings_url:
+        await message.answer(
+            "Откройте настройки.\nЗапасной мастер в чате: /setup",
+            reply_markup=open_settings_kb(settings.miniapp_settings_url),
+        )
+        await message.answer("Меню обновлено.", reply_markup=main_menu())
+        return
     profile = await profiles.get_or_none(session_factory, message.from_user.id)
     if profiles.is_ready(profile):
         assert profile is not None

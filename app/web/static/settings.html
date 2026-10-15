@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Настройки</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: var(--tg-theme-bg-color, #f4f4f5);
+      --text: var(--tg-theme-text-color, #18181b);
+      --hint: var(--tg-theme-hint-color, #71717a);
+      --card: var(--tg-theme-secondary-bg-color, #ffffff);
+      --btn: var(--tg-theme-button-color, #2481cc);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --line: color-mix(in srgb, var(--text) 12%, transparent);
+      --ok: #15803d;
+      --bad: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px 16px 88px;
+    }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    h2 { font-size: 16px; margin: 0; }
+    p { margin: 0; }
+    .hint { color: var(--hint); font-size: 13px; }
+    .status {
+      margin: 12px 0 16px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--card);
+      font-size: 14px;
+    }
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--bad); }
+    form {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    label { display: block; font-size: 13px; margin: 10px 0 4px; }
+    input, select {
+      width: 100%;
+      font: inherit;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    button {
+      margin-top: 14px;
+      width: 100%;
+      border: 0;
+      border-radius: 8px;
+      padding: 12px;
+      font: inherit;
+      font-weight: 600;
+      background: var(--btn);
+      color: var(--btn-text);
+    }
+    button:disabled { opacity: 0.6; }
+    .msg { min-height: 1.2em; margin-top: 8px; font-size: 13px; }
+    .msg.ok { color: var(--ok); }
+    .msg.bad { color: var(--bad); }
+    nav {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4px;
+      padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+      background: var(--card);
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+      text-align: center;
+    }
+    nav .active { font-weight: 700; }
+    nav span { color: var(--hint); padding: 6px 0; }
+  </style>
+</head>
+<body>
+  <h1>Настройки</h1>
+  <p class="hint">Секреты хранятся зашифрованно. Пустое поле ключа не затирает уже сохранённый. Запасной мастер в чате: /setup</p>
+  <div id="status" class="status">Загрузка…</div>
+
+  <form id="cdek">
+    <h2>СДЭК</h2>
+    <p class="hint" id="cdek-mask"></p>
+    <label>CLIENT_ID</label>
+    <input name="cdek_client_id" autocomplete="off" placeholder="не менять" />
+    <label>CLIENT_SECRET</label>
+    <input name="cdek_client_secret" type="password" autocomplete="off" placeholder="не менять" />
+    <label>Режим</label>
+    <select name="cdek_test_mode">
+      <option value="false">Prod</option>
+      <option value="true">Тест</option>
+    </select>
+    <label>ПВЗ отгрузки</label>
+    <input name="cdek_shipment_point" autocomplete="off" placeholder="PRM17" />
+    <label>Тип заказа</label>
+    <input name="cdek_order_type" inputmode="numeric" value="1" />
+    <button type="submit">Сохранить СДЭК</button>
+    <div class="msg" data-msg></div>
+  </form>
+
+  <form id="dadata">
+    <h2>DaData</h2>
+    <p class="hint" id="dadata-mask"></p>
+    <label>API-ключ</label>
+    <input name="dadata_api_key" autocomplete="off" placeholder="не менять" />
+    <label>Secret-ключ</label>
+    <input name="dadata_secret_key" type="password" autocomplete="off" placeholder="не менять" />
+    <button type="submit">Сохранить DaData</button>
+    <div class="msg" data-msg></div>
+  </form>
+
+  <form id="sender">
+    <h2>Отправитель</h2>
+    <label>ФИО</label>
+    <input name="sender_name" autocomplete="name" />
+    <label>Телефон</label>
+    <input name="sender_phone" inputmode="tel" placeholder="+79001234567" />
+    <button type="submit">Сохранить отправителя</button>
+    <div class="msg" data-msg></div>
+  </form>
+
+  <form id="package">
+    <h2>Товар и габариты</h2>
+    <label>Название в накладной</label>
+    <input name="item_name" />
+    <label>Вес, г</label>
+    <input name="weight_g" inputmode="numeric" />
+    <div class="row">
+      <div>
+        <label>Длина, см</label>
+        <input name="length_cm" inputmode="numeric" />
+      </div>
+      <div>
+        <label>Ширина, см</label>
+        <input name="width_cm" inputmode="numeric" />
+      </div>
+      <div>
+        <label>Высота, см</label>
+        <input name="height_cm" inputmode="numeric" />
+      </div>
+    </div>
+    <button type="submit">Сохранить посылку</button>
+    <div class="msg" data-msg></div>
+  </form>
+
+  <nav>
+    <span>Заказы в чате</span>
+    <span class="active">Настройки</span>
+    <span>Заказ в чате</span>
+  </nav>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+    const initData = (tg && tg.initData) || "";
+
+    function setStatus(settings) {
+      const node = document.getElementById("status");
+      if (!settings) {
+        node.className = "status bad";
+        node.textContent = "Не удалось загрузить настройки";
+        return;
+      }
+      node.className = settings.ready ? "status ok" : "status bad";
+      node.textContent = settings.ready
+        ? "Профиль готов: можно создавать заказы в боте."
+        : "Профиль ещё не готов. Заполните СДЭК, DaData и отправителя.";
+      document.getElementById("cdek-mask").textContent = settings.cdek_client_id_set
+        ? "CLIENT_ID " + settings.cdek_client_id_mask + (settings.cdek_client_secret_set ? ", секрет сохранён" : ", секрет не задан")
+        : "Ключи СДЭК ещё не сохранены";
+      document.getElementById("dadata-mask").textContent = settings.dadata_api_key_set
+        ? "API " + settings.dadata_api_key_mask + (settings.dadata_secret_set ? ", секрет сохранён" : ", секрет не задан")
+        : "Ключи DaData ещё не сохранены";
+      const cdek = document.getElementById("cdek");
+      cdek.cdek_test_mode.value = settings.cdek_test_mode ? "true" : "false";
+      cdek.cdek_shipment_point.value = settings.cdek_shipment_point || "";
+      cdek.cdek_order_type.value = settings.cdek_order_type || 1;
+      const sender = document.getElementById("sender");
+      sender.sender_name.value = settings.sender_name || "";
+      sender.sender_phone.value = settings.sender_phone || "";
+      const pack = document.getElementById("package");
+      pack.item_name.value = settings.item_name || "";
+      pack.weight_g.value = settings.weight_g || "";
+      pack.length_cm.value = settings.length_cm || "";
+      pack.width_cm.value = settings.width_cm || "";
+      pack.height_cm.value = settings.height_cm || "";
+    }
+
+    async function api(method, body) {
+      const response = await fetch("/miniapp/settings", {
+        method,
+        headers: {
+          "Authorization": "tma " + initData,
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(data.error || "Откройте страницу из бота");
+      }
+      return data;
+    }
+
+    function formPayload(form) {
+      const payload = { section: form.id };
+      for (const element of form.elements) {
+        if (!element.name || element.type === "submit") continue;
+        if (element.name === "cdek_test_mode") {
+          payload[element.name] = element.value === "true";
+          continue;
+        }
+        payload[element.name] = element.value.trim();
+      }
+      return payload;
+    }
+
+    async function load() {
+      if (!initData) {
+        document.getElementById("status").className = "status bad";
+        document.getElementById("status").textContent = "Откройте эту страницу кнопкой «Настройки» в боте.";
+        return;
+      }
+      try {
+        const data = await api("GET");
+        setStatus(data.settings);
+      } catch (error) {
+        document.getElementById("status").className = "status bad";
+        document.getElementById("status").textContent = error.message;
+      }
+    }
+
+    for (const form of document.querySelectorAll("form")) {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = form.querySelector("button");
+        const msg = form.querySelector("[data-msg]");
+        button.disabled = true;
+        msg.className = "msg";
+        msg.textContent = "Проверяю и сохраняю…";
+        try {
+          const data = await api("PATCH", formPayload(form));
+          const errors = (data.errors && data.errors[form.id]) || [];
+          if (errors.length) {
+            msg.className = "msg bad";
+            msg.textContent = errors.join(" ");
+          } else {
+            msg.className = "msg ok";
+            msg.textContent = "Сохранено";
+            for (const element of form.elements) {
+              if (element.type === "password" || element.name.endsWith("_client_id") || element.name.endsWith("api_key") || element.name.endsWith("secret_key") || element.name === "cdek_client_secret") {
+                element.value = "";
+              }
+            }
+          }
+          if (data.settings) setStatus(data.settings);
+        } catch (error) {
+          msg.className = "msg bad";
+          msg.textContent = error.message;
+        } finally {
+          button.disabled = false;
+        }
+      });
+    }
+
+    load();
+  </script>
+</body>
+</html>
